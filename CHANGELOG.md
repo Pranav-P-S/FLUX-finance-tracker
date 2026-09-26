@@ -4,6 +4,34 @@ All notable changes to Flux are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-26
+
+### Fixed
+
+- Two genuine purchases sharing an amount, payee and minute no longer collide:
+  transaction identity is now SHA-256 of the raw alert text and posting app
+  instead of the parsed minute/amount/payee triple.
+- Refunds no longer inflate income. They offset their category's spend, so a
+  returned item cancels part of the original expense.
+- Dashboard and analytics aggregates ignore pending authorization holds.
+
+### Added
+
+- Pending-hold lifecycle: holds are stored separately, settle away
+  automatically when the final charge posts from the same payee, and expire
+  72 hours after capture if they never do.
+- Base currency preference (Vault -> Preferences). Alerts in any other
+  currency queue in the Inbox for review, since no exchange rates are applied.
+- Streamed JSON export and import: archives are written and read page by page
+  straight from disk, so memory stays flat regardless of history size.
+- Lifecycle tags (refund / pending) on transaction tiles.
+- Room migration 1 -> 2 for the new `kind` column.
+
+### Changed
+
+- Import now takes a file path and streams on the native side; archive
+  content never passes through Dart memory.
+
 ## [1.0.0] - 2026-09-26
 
 ### Added
