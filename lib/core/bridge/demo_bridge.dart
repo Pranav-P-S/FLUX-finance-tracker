@@ -74,7 +74,13 @@ class DemoBridge implements FluxBridge {
   Future<String> exportState() async => '';
 
   @override
-  Future<int> importState(String json) async => 0;
+  Future<int> importState(String path) async => 0;
+
+  @override
+  Future<String> baseCurrency() async => 'INR';
+
+  @override
+  Future<void> setBaseCurrency(String currency) async {}
 
   @override
   Future<bool> biometricEnabled() async => false;

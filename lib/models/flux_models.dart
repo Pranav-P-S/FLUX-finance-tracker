@@ -3,6 +3,22 @@ import 'package:flutter/material.dart';
 /// Dart mirrors of the entities exchanged with the Android engine over the
 /// platform bridge.
 
+/// Lifecycle of a money event, mirroring the Kotlin TransactionKind.
+enum TransactionKind {
+  purchase('purchase'),
+  refund('refund'),
+  pending('pending');
+
+  final String id;
+
+  const TransactionKind(this.id);
+
+  static TransactionKind from(String? id) => TransactionKind.values.firstWhere(
+    (k) => k.id == id,
+    orElse: () => TransactionKind.purchase,
+  );
+}
+
 class Transaction {
   final int id;
   final double amount; // signed: debit negative, credit positive
@@ -14,6 +30,7 @@ class Transaction {
   final double categoryConfidence;
   final bool needsReview;
   final String parseMethod;
+  final TransactionKind kind;
   final String sourcePackage;
   final String rawText;
 
@@ -28,11 +45,14 @@ class Transaction {
     required this.categoryConfidence,
     required this.needsReview,
     required this.parseMethod,
+    this.kind = TransactionKind.purchase,
     required this.sourcePackage,
     required this.rawText,
   });
 
   bool get isCredit => amount > 0;
+  bool get isPending => kind == TransactionKind.pending;
+  bool get isRefund => kind == TransactionKind.refund;
 
   factory Transaction.fromMap(Map<Object?, Object?> map) {
     return Transaction(
@@ -46,6 +66,7 @@ class Transaction {
       categoryConfidence: (map['categoryConfidence'] as num?)?.toDouble() ?? 0,
       needsReview: map['needsReview'] as bool? ?? false,
       parseMethod: map['parseMethod'] as String? ?? '',
+      kind: TransactionKind.from(map['kind'] as String?),
       sourcePackage: map['sourcePackage'] as String? ?? '',
       rawText: map['rawText'] as String? ?? '',
     );

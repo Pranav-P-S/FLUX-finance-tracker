@@ -32,21 +32,23 @@ final pulseProvider = AsyncNotifierProvider<PulseController, PulseSummary>(
   PulseController.new,
 );
 
-class TransactionsController extends AsyncNotifier<List<Transaction>> {
+class RecentTransactionsController extends AsyncNotifier<List<Transaction>> {
+  /// The Pulse only surfaces the newest tiles; dashboards read the SQL
+  /// aggregates instead, so pulling a single page keeps this cheap.
   @override
   Future<List<Transaction>> build() =>
-      ref.watch(bridgeProvider).allTransactions();
+      ref.watch(bridgeProvider).transactionsPage(page: 0, pageSize: 50);
 
   Future<void> refresh() async {
     state = await AsyncValue.guard(
-      () => ref.read(bridgeProvider).allTransactions(),
+      () => ref.read(bridgeProvider).transactionsPage(page: 0, pageSize: 50),
     );
   }
 }
 
-final transactionsProvider =
-    AsyncNotifierProvider<TransactionsController, List<Transaction>>(
-      TransactionsController.new,
+final recentTransactionsProvider =
+    AsyncNotifierProvider<RecentTransactionsController, List<Transaction>>(
+      RecentTransactionsController.new,
     );
 
 class InboxController extends AsyncNotifier<List<Transaction>> {
@@ -176,3 +178,18 @@ class VaultController extends AsyncNotifier<bool> {
 final biometricProvider = AsyncNotifierProvider<VaultController, bool>(
   VaultController.new,
 );
+
+class BaseCurrencyController extends AsyncNotifier<String> {
+  @override
+  Future<String> build() => ref.watch(bridgeProvider).baseCurrency();
+
+  Future<void> set(String currency) async {
+    await ref.read(bridgeProvider).setBaseCurrency(currency);
+    state = AsyncData(currency);
+  }
+}
+
+final baseCurrencyProvider =
+    AsyncNotifierProvider<BaseCurrencyController, String>(
+      BaseCurrencyController.new,
+    );

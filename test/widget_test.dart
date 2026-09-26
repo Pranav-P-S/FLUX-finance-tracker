@@ -13,6 +13,7 @@ Transaction _tx({
   String merchant = 'SWIGGY',
   String category = 'food_drink',
   bool needsReview = false,
+  TransactionKind kind = TransactionKind.purchase,
 }) => Transaction(
   id: id,
   amount: amount,
@@ -24,6 +25,7 @@ Transaction _tx({
   categoryConfidence: 0.55,
   needsReview: needsReview,
   parseMethod: 'generic_debit',
+  kind: kind,
   sourcePackage: 'com.bank.app',
   rawText: 'Rs 450 debited to SWIGGY',
 );
@@ -71,6 +73,41 @@ void main() {
     expect(find.text('₹65,000'), findsOneWidget);
   });
 
+  testWidgets('Refund and pending rows carry lifecycle tags', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Column(
+            children: [
+              TxTile(
+                tx: _tx(
+                  amount: 3499,
+                  merchant: 'DECATHLON',
+                  id: 7,
+                  category: 'shopping',
+                  kind: TransactionKind.refund,
+                ),
+                categoryLabel: 'Shopping',
+              ),
+              TxTile(
+                tx: _tx(
+                  amount: -500,
+                  merchant: 'TAJ HOTELS',
+                  id: 8,
+                  category: 'travel',
+                  kind: TransactionKind.pending,
+                ),
+                categoryLabel: 'Travel',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    expect(find.text('REFUND'), findsOneWidget);
+    expect(find.text('PENDING'), findsOneWidget);
+  });
+
   testWidgets('Pulse shows summary and recent activity from the bridge', (
     tester,
   ) async {
@@ -78,7 +115,7 @@ void main() {
       ProviderScope(
         overrides: [
           pulseProvider.overrideWith(_FakePulse.new),
-          transactionsProvider.overrideWith(_FakeTransactions.new),
+          recentTransactionsProvider.overrideWith(_FakeRecentTransactions.new),
           categoriesProvider.overrideWith(_FakeCategories.new),
           captureStatusProvider.overrideWith(_FakeCapture.new),
         ],
@@ -104,7 +141,7 @@ class _FakePulse extends PulseController {
   );
 }
 
-class _FakeTransactions extends TransactionsController {
+class _FakeRecentTransactions extends RecentTransactionsController {
   @override
   Future<List<Transaction>> build() async => [_tx()];
 }

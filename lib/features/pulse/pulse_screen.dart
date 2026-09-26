@@ -14,14 +14,14 @@ class PulseScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pulse = ref.watch(pulseProvider);
-    final txs = ref.watch(transactionsProvider);
+    final txs = ref.watch(recentTransactionsProvider);
     final capture = ref.watch(captureStatusProvider);
 
     return RefreshIndicator(
       color: FluxTheme.accent,
       onRefresh: () async {
         await ref.read(pulseProvider.notifier).refresh();
-        await ref.read(transactionsProvider.notifier).refresh();
+        await ref.read(recentTransactionsProvider.notifier).refresh();
         await ref.read(captureStatusProvider.notifier).refresh();
       },
       child: ListView(

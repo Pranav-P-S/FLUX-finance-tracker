@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,6 +16,7 @@ class VaultScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final categories = ref.watch(categoriesProvider);
     final biometric = ref.watch(biometricProvider);
+    final baseCurrency = ref.watch(baseCurrencyProvider);
     final capture = ref.watch(captureStatusProvider);
 
     return ListView(
@@ -113,6 +112,38 @@ class VaultScreen extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 18),
+        _Section('Preferences'),
+        GlassCard(
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text(
+              'Base currency',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              'Alerts in other currencies wait in the Inbox',
+              style: const TextStyle(color: FluxTheme.inkDim, fontSize: 12),
+            ),
+            trailing: baseCurrency.when(
+              loading: () => const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              error: (e, _) =>
+                  const Text('INR', style: TextStyle(color: FluxTheme.inkDim)),
+              data: (currency) => Text(
+                currency,
+                style: const TextStyle(
+                  color: FluxTheme.accent,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            onTap: () => _pickBaseCurrency(context, ref),
+          ),
+        ),
+        const SizedBox(height: 18),
         _Section('Security'),
         GlassCard(
           child: SwitchListTile(
@@ -205,6 +236,26 @@ class VaultScreen extends ConsumerWidget {
     );
   }
 
+  Future<void> _pickBaseCurrency(BuildContext context, WidgetRef ref) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        backgroundColor: FluxTheme.surface,
+        title: const Text('Base currency', style: TextStyle(fontSize: 17)),
+        children: [
+          for (final currency in const ['INR', 'USD', 'EUR', 'GBP'])
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(dialogContext).pop(currency),
+              child: Text(currency),
+            ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await ref.read(baseCurrencyProvider.notifier).set(selected);
+    }
+  }
+
   void _openEditor(BuildContext context, WidgetRef ref) {
     showModalBottomSheet<void>(
       context: context,
@@ -237,8 +288,9 @@ class VaultScreen extends ConsumerWidget {
       final picked = await FilePicker.pickFiles(type: FileType.any);
       final path = picked.single.path;
       if (path == null) return;
-      final json = await File(path).readAsString();
-      final imported = await ref.read(bridgeProvider).importState(json);
+      // The archive is streamed straight from disk on the native side; the
+      // file content never passes through Dart memory.
+      final imported = await ref.read(bridgeProvider).importState(path);
       messenger.showSnackBar(
         SnackBar(content: Text('Imported $imported transactions')),
       );

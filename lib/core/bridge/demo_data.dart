@@ -116,6 +116,36 @@ abstract final class DemoData {
       hour: 18,
       raw: 'HDFC BANK\nRs 1,450.00 debited towards INDIAN OIL PETROL PUMP',
     ),
+    Transaction(
+      id: 7,
+      amount: 3499,
+      currency: 'INR',
+      merchant: 'DECATHLON',
+      accountHint: 'XX8842',
+      timestamp: DateTime(2026, 9, 16, 10).millisecondsSinceEpoch,
+      category: 'shopping',
+      categoryConfidence: 0.95,
+      needsReview: false,
+      parseMethod: 'generic_credit',
+      kind: TransactionKind.refund,
+      sourcePackage: 'com.bank.app',
+      rawText: 'ICICI\nRefund of Rs 3,499 received from DECATHLON SPORTS',
+    ),
+    Transaction(
+      id: 8,
+      amount: -500,
+      currency: 'INR',
+      merchant: 'TAJ HOTELS',
+      accountHint: 'XX8842',
+      timestamp: DateTime(2026, 9, 18, 19).millisecondsSinceEpoch,
+      category: 'travel',
+      categoryConfidence: 0.9,
+      needsReview: false,
+      parseMethod: 'generic_debit',
+      kind: TransactionKind.pending,
+      sourcePackage: 'com.bank.app',
+      rawText: 'HDFC BANK\nRs 500 held as pre-authorization by TAJ HOTELS',
+    ),
     _tx(
       id: 7,
       amount: -2199,
@@ -127,16 +157,17 @@ abstract final class DemoData {
     ),
   ];
 
+  /// Mirrors the native accounting rules: holds are invisible to every
+  /// aggregate, refunds offset their category instead of counting as income.
   static PulseSummary get summary {
-    final net = transactions.fold<double>(0, (s, t) => s + t.amount);
-    final credit = transactions.fold<double>(
-      0,
-      (s, t) => s + (t.amount > 0 ? t.amount : 0),
-    );
-    final debit = transactions.fold<double>(
-      0,
-      (s, t) => s + (t.amount < 0 ? -t.amount : 0),
-    );
+    final settled = transactions.where((t) => !t.isPending);
+    final net = settled.fold<double>(0, (s, t) => s + t.amount);
+    final credit = settled
+        .where((t) => t.amount > 0 && !t.isRefund)
+        .fold<double>(0, (s, t) => s + t.amount);
+    final debit = settled
+        .where((t) => t.amount < 0)
+        .fold<double>(0, (s, t) => s + -t.amount);
     return PulseSummary(
       netBalance: net,
       totalCredit: credit,
@@ -148,18 +179,29 @@ abstract final class DemoData {
 
   static List<CategorySpend> get byCategory {
     final totals = <String, double>{};
-    for (final t in transactions.where((t) => t.amount < 0)) {
-      totals[t.category] = (totals[t.category] ?? 0) + -t.amount;
+    final counts = <String, int>{};
+    for (final t in transactions.where((t) => !t.isPending)) {
+      if (t.amount < 0) {
+        totals[t.category] = (totals[t.category] ?? 0) + -t.amount;
+        counts[t.category] = (counts[t.category] ?? 0) + 1;
+      } else if (t.isRefund) {
+        totals[t.category] = (totals[t.category] ?? 0) - t.amount;
+        counts[t.category] = (counts[t.category] ?? 0) + 1;
+      }
     }
     return [
       for (final e in totals.entries)
-        CategorySpend(categoryId: e.key, total: e.value, count: 1),
+        CategorySpend(
+          categoryId: e.key,
+          total: e.value < 0 ? 0 : e.value,
+          count: counts[e.key] ?? 1,
+        ),
     ]..sort((a, b) => b.total.compareTo(a.total));
   }
 
   static List<DaySpend> get byDay {
     final totals = <int, double>{};
-    for (final t in transactions.where((t) => t.amount < 0)) {
+    for (final t in transactions.where((t) => t.amount < 0 && !t.isPending)) {
       final d = DateTime.fromMillisecondsSinceEpoch(t.timestamp).day;
       totals[d] = (totals[d] ?? 0) + -t.amount;
     }

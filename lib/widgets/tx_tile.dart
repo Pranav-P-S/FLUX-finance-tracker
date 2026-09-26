@@ -87,6 +87,17 @@ class TxTile extends StatelessWidget {
                           fontSize: 11,
                         ),
                       ),
+                      if (tx.isRefund) ...[
+                        const SizedBox(width: 6),
+                        _TagChip(label: 'REFUND', color: FluxTheme.credit),
+                      ],
+                      if (tx.isPending) ...[
+                        const SizedBox(width: 6),
+                        const _TagChip(
+                          label: 'PENDING',
+                          color: FluxTheme.inkDim,
+                        ),
+                      ],
                       Text(
                         '  •  $dd/$mm $hh:$mi',
                         style: const TextStyle(
@@ -109,6 +120,35 @@ class TxTile extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Small lifecycle tag for rows that are refunds or unsettled holds.
+class _TagChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _TagChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(5),
+        color: color.withValues(alpha: 0.14),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 8.5,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.5,
         ),
       ),
     );

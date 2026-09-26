@@ -29,7 +29,11 @@ abstract class FluxBridge {
   Future<bool> ignoringBatteryOptimizations();
   Future<void> requestIgnoreBatteryOptimizations();
   Future<String> exportState();
-  Future<int> importState(String json);
+  Future<int> importState(String path);
+
+  /// Display currency for dashboards; foreign-currency alerts queue in the Inbox.
+  Future<String> baseCurrency();
+  Future<void> setBaseCurrency(String currency);
   Future<bool> biometricEnabled();
   Future<void> setBiometricEnabled(bool enabled);
   Future<String> simulateNotification(String text, {String packageName});
@@ -200,9 +204,17 @@ class NativeBridge implements FluxBridge {
       (await _invokeMap('exportState'))['path'] as String? ?? '';
 
   @override
-  Future<int> importState(String json) async =>
-      (await _invokeMap('importState', {'json': json}))['imported'] as int? ??
+  Future<int> importState(String path) async =>
+      (await _invokeMap('importState', {'path': path}))['imported'] as int? ??
       0;
+
+  @override
+  Future<String> baseCurrency() async =>
+      (await _invokeMap('getBaseCurrency'))['currency'] as String? ?? 'INR';
+
+  @override
+  Future<void> setBaseCurrency(String currency) =>
+      _invoke<dynamic>('setBaseCurrency', {'currency': currency});
 
   @override
   Future<bool> biometricEnabled() => _invoke<bool>('getBiometricEnabled');

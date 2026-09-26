@@ -30,7 +30,7 @@ class _FluxAppState extends ConsumerState<FluxApp> {
       if (!mounted) return;
       ref.read(pulseProvider.notifier).refresh();
       ref.read(inboxProvider.notifier).refresh();
-      ref.read(transactionsProvider.notifier).refresh();
+      ref.read(recentTransactionsProvider.notifier).refresh();
       ref.read(categoriesProvider.notifier).refresh();
       ref.read(captureStatusProvider.notifier).refresh();
     });
