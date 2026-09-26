@@ -93,10 +93,25 @@ whenever the process wakes up; no scheduler is involved.
 
 | Table | Purpose |
 |---|---|
-| `transactions` | One money event. `hash` is unique (dedup). `amount` is signed. `needsReview` gates Inbox routing. |
+| `transactions` | One money event. `hash` is unique (dedup). `amount` is signed. `kind` selects the lifecycle (purchase/refund/pending). `needsReview` gates Inbox routing. |
 | `categories` | Label, color, icon, keyword list, `isDefault` guard for the eleven seeded rows. |
-| `training_samples` | Labeled text for the Naive Bayes model; grows with each manual approval. |
-| `settings` | Key/value store (biometric lock, onboarding flags). |
+| `training_samples` | Sanitized labeled text (payee + purpose words, no digits or references); grows with each manual approval. |
+| `settings` | Key/value store (biometric lock, base currency). |
+
+## Data retention and privacy
+
+- Raw alert text exists only as long as it is useful: it drives parsing, Inbox
+  triage and audit. A sweep that runs whenever the process wakes up scrubs
+  `rawText` from settled rows 72 hours after capture and expires unsettled
+  holds on the same schedule. What remains are the structured fields: amount,
+  payee, category, date.
+- Training samples never contain the raw payload — only the extracted payee
+  plus alphabetic purpose words, with digit runs (references, amounts, account
+  digits) stripped before insertion.
+- JSON archives omit raw alert text entirely: exports land in shared storage,
+  and the archive contains the structured transaction fields only.
+- Cloud backups are disabled (`allowBackup="false"`): the store is as sensitive
+  as the notifications it came from.
 
 ## Channel contract
 
@@ -107,7 +122,7 @@ Channel: `flux.native_bridge`. All lists are paginated at 50 items.
 | `getPulseSummary` | — | net balance, credit, debit, counts |
 | `getTransactionsPage` | `page`, `pageSize` | items, `hasMore`, total |
 | `getInbox` | `limit` | transactions with `needsReview = 1` |
-| `categorizeTransaction` | `id`, `categoryId` | applies choice, records training sample, retrains |
+| `categorizeTransaction` | `id`, `categoryId` | applies choice, records sanitized training sample, folds into model incrementally |
 | `deleteTransaction` | `id` | — |
 | `getSpendingByCategory` | `startMs`, `endMs` | totals per category |
 | `getDailySpend` | `startMs`, `endMs` | totals per day |

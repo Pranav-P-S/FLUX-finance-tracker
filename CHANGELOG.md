@@ -4,6 +4,35 @@ All notable changes to Flux are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-09-26
+
+### Fixed
+
+- Raw alert text is scrubbed from the database 72 hours after capture, once a
+  transaction has left the Inbox. Only the structured fields (amount, payee,
+  category, date) are retained long-term.
+- Training samples for the categorizer no longer contain the raw alert
+  payload — payee plus purpose words only, with digit runs (references,
+  amounts, account digits) stripped before insertion.
+- JSON archives omit raw alert text entirely. Exports land in shared storage
+  where any app with storage access can read them; the archive now carries the
+  structured transaction fields only.
+- Chart animations no longer restart on unrelated rebuilds: slice and bar
+  comparisons use value equality instead of list identity.
+- File-picker cancellation during import no longer surfaces a spurious error.
+
+### Added
+
+- Accessibility: transaction tiles read as a single utterance to screen
+  readers; both charts carry semantic labels.
+
+### Changed
+
+- User category corrections now fold into the Naive Bayes model incrementally
+  (copy-on-write) instead of rebuilding from the full training corpus on the
+  ingestion path.
+- Removed the unused whole-store fetch from the platform bridge.
+
 ## [1.1.0] - 2026-09-26
 
 ### Fixed
