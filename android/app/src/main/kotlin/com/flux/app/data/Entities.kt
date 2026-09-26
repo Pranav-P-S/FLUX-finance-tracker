@@ -1,0 +1,65 @@
+package com.flux.app.data
+
+import androidx.room.Entity
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import androidx.room.TypeConverter
+
+/**
+ * A single money event extracted from a notification. [hash] is the dedup key:
+ * SHA-256(epochMinute | amount | merchant) — see com.flux.app.engine.Dedup.
+ * [amount] is signed: debits are negative, credits positive.
+ */
+@Entity(
+    tableName = "transactions",
+    indices = [Index(value = ["hash"], unique = true)],
+)
+data class TransactionEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val hash: String,
+    val amount: Double,
+    val currency: String,
+    val merchant: String,
+    val accountHint: String?,
+    val timestamp: Long,
+    val sourcePackage: String,
+    val rawText: String,
+    val category: String,
+    val categoryConfidence: Double,
+    val needsReview: Boolean,
+    val parseMethod: String,
+    val createdAt: Long,
+)
+
+@Entity(tableName = "categories")
+data class CategoryEntity(
+    @PrimaryKey val id: String,
+    val label: String,
+    val color: Long,
+    val icon: String,
+    val keywords: List<String>,
+    val isDefault: Boolean,
+)
+
+class KeywordConverter {
+    @TypeConverter
+    fun fromKeywords(value: List<String>): String = value.joinToString("\u0001")
+
+    @TypeConverter
+    fun toKeywords(value: String): List<String> =
+        if (value.isEmpty()) emptyList() else value.split("\u0001")
+}
+
+/** One labeled example for the on-device Naive Bayes model. */
+@Entity(tableName = "training_samples")
+data class TrainingSample(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val text: String,
+    val categoryId: String,
+)
+
+@Entity(tableName = "settings")
+data class SettingEntry(
+    @PrimaryKey val key: String,
+    val value: String,
+)
