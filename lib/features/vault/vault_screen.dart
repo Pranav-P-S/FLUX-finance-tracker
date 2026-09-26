@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -79,11 +81,7 @@ class VaultScreen extends ConsumerWidget {
                     category: c,
                     onDelete: c.isDefault
                         ? null
-                        : () async {
-                            await ref
-                                .read(categoriesProvider.notifier)
-                                .remove(c.id);
-                          },
+                        : () => _confirmDelete(context, ref, c),
                   ),
                 const SizedBox(height: 8),
                 NeuButton(
@@ -236,6 +234,47 @@ class VaultScreen extends ConsumerWidget {
     );
   }
 
+  /// Deleting a category is destructive and reassigns its transactions: ask
+  /// first, and surface failures instead of dying on an unhandled async error.
+  Future<void> _confirmDelete(
+    BuildContext context,
+    WidgetRef ref,
+    FluxCategory category,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: FluxTheme.surface,
+        title: const Text('Delete category?'),
+        content: Text(
+          '"${category.label}" will be removed and its transactions moved to '
+          'Uncategorized for review.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: FluxTheme.debt),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ref.read(categoriesProvider.notifier).remove(category.id);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+    }
+  }
+
   Future<void> _pickBaseCurrency(BuildContext context, WidgetRef ref) async {
     final selected = await showDialog<String>(
       context: context,
@@ -276,7 +315,9 @@ class VaultScreen extends ConsumerWidget {
     final messenger = ScaffoldMessenger.of(context);
     try {
       final path = await ref.read(bridgeProvider).exportState();
-      messenger.showSnackBar(SnackBar(content: Text('Exported to $path')));
+      // Name only — the absolute path is noise (and app-private anyway).
+      final name = path.split(Platform.pathSeparator).last;
+      messenger.showSnackBar(SnackBar(content: Text('Exported to $name')));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Export failed: $e')));
     }
@@ -292,10 +333,15 @@ class VaultScreen extends ConsumerWidget {
       // The archive is streamed straight from disk on the native side; the
       // file content never passes through Dart memory.
       final imported = await ref.read(bridgeProvider).importState(path);
+      // An import replaces the entire store: every reader refreshes, not just
+      // categories (Lens/Pulse read aggregates that no longer exist).
+      await ref.read(categoriesProvider.notifier).refresh();
+      await ref.read(pulseProvider.notifier).refresh();
+      await ref.read(inboxProvider.notifier).refresh();
+      await ref.read(recentTransactionsProvider.notifier).refresh();
       messenger.showSnackBar(
         SnackBar(content: Text('Imported $imported transactions')),
       );
-      await ref.read(categoriesProvider.notifier).refresh();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Import failed: $e')));
     }

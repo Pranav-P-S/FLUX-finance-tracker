@@ -2,7 +2,7 @@ package com.flux.app.parse
 
 import java.time.LocalDate
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
 import java.util.Locale
 
 /**
@@ -33,18 +33,26 @@ data class ParsedTransaction(
 
 object UniversalParser {
 
+    /** Fabricated or absurd amounts (crafted text, digit runs) never parse. */
+    private const val MAX_AMOUNT = 1e9
+
     private val NOISE = Regex("""(?i)\b(otp|one[\s-]?time\s+password|password|pin)\b""")
 
-    // Rs 1,234.56 / INR 1234 / ₹1234 / $12.50 / EUR 9,90 / 1234.56 rupees
+    // Rs 1,234.56 / INR 1234 / ₹1234 / $12.50 / EUR 9,90 / 1234.56 rupees.
+    // The lookbehind keeps "yours 100" from matching as "rs 100".
     private val AMOUNT_PREFIX = Regex(
-        """(?i)(rs\.?|inr|₹|\$|usd|eur|€|gbp|£)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"""
+        """(?i)(?<![a-z])(rs\.?|inr|₹|\$|usd|eur|€|gbp|£)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"""
     )
     private val AMOUNT_SUFFIX = Regex(
         """(?i)([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(rs\.?|inr|rupees?|₹|\$|usd|eur|gbp|€|£)"""
     )
 
+    // Direction detection runs on text where the "credit card" collocation is
+    // masked out: "Your credit card was debited" must be a debit, not income
+    // because a bare `credit` verb matched inside "credit card".
+    private val CREDIT_CARD_COLLOCATION = Regex("""(?i)\bcredit\s+(card|acct|account|limit)\b""")
     private val CREDIT_VERBS = Regex(
-        """(?i)\b(credited|credit|received|received from|refund(?:ed)?|deposited|deposit|salary|salaries|cashback|cash back|reversal|reversed|added to|interest credit)\b"""
+        """(?i)\b(credited|credit|received|refund(?:ed)?|deposited|deposit|salary|salaries|cashback|cash back|reversal|reversed|added to|interest credit)\b"""
     )
     private val DEBIT_VERBS = Regex(
         """(?i)\b(debited|debit|spent|paid|pay|purchase|purchased|withdrawn|withdrawal|deducted|charged|sent|transfer(?:red)? to|order(?:ed)?|booked|subscription)\b"""
@@ -66,15 +74,31 @@ object UniversalParser {
     )
     // UPI handles: paid to swiggy@ybl / UPI/SWIGGY@OKICICI
     private val UPI_HANDLE = Regex("""([a-zA-Z][a-zA-Z0-9._-]{1,30})@[a-zA-Z]{2,}""")
-    // Longest ALL-CAPS run that is not a payment-network acronym.
-    private val CAPS_RUN = Regex("""\b([A-Z][A-Z0-9&.'\-]{2,}(?:\s+[A-Z0-9&.'\-]{2,})*)\b""")
+    // Longest ALL-CAPS run that is not a payment-network acronym. Separators are
+    // spaces/tabs only — a run must never swallow across lines.
+    private val CAPS_RUN = Regex("""([A-Z][A-Z0-9&.'\-]{2,}(?:[ \t]+[A-Z0-9&.'\-]{2,})*)""")
 
     private val ACCOUNT_HINT = Regex(
-        """(?i)(?:a/?c|acct|account|card)\s*(?:no\.?|number|ending)?\s*[:\-]?\s*([xX*]*\d{4})"""
+        """(?i)(?:a/?c|acct|account|card)\s*(?:no\.?|number|ending)?\s*[:\-]?\s*([xX*]*\d{4})(?!\d)"""
     )
+    // A full 16-digit PAN must never become a 4-digit "hint" (or reach the DB).
+    private val FULL_PAN = Regex("""\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}""")
 
-    private val DATE_DMY = Regex("""\b(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?\b""")
-    private val DATE_TEXT = Regex("""\b(\d{1,2})[\s-]([A-Za-z]{3,9})\.?(?:[\s-](\d{2,4}))?\b""")
+    // Dates must be anchored to a date keyword (on/dt/dated) or carry a year:
+    // unanchored "24/7" and "EMI 2/12" are idioms, not calendar dates.
+    private val DATE_DMY = Regex(
+        """(?i)\b(?:on|dt|dated)\s*[:]?\s*(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?\b"""
+    )
+    private val DATE_TEXT = Regex(
+        """(?i)\b(?:on|dt|dated)\s*[:]?\s*(\d{1,2})[\s-]([A-Za-z]{3,9})\.?(?:[\s-](\d{2,4}))?\b"""
+    )
+    // Standalone full dates with years are unambiguous even without a keyword.
+    private val DATE_DMY_YEARED = Regex("""\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b""")
+
+    private val MONTH_FORMATTER = DateTimeFormatterBuilder()
+        .parseCaseInsensitive()
+        .appendPattern("dd MMM yyyy")
+        .toFormatter(Locale.ENGLISH)
 
     private val NETWORK_ACRONYMS = setOf(
         "UPI", "IMPS", "NEFT", "RTGS", "POS", "ATM", "OTP", "INR", "USD", "EUR", "GBP",
@@ -101,21 +125,11 @@ object UniversalParser {
         val amountMatch = findAmount(text) ?: return null
         val (amount, currency) = amountMatch
 
-        val isCredit = when {
-            CREDIT_VERBS.containsMatchIn(text) && !DEBIT_VERBS.containsMatchIn(text) -> true
-            DEBIT_VERBS.containsMatchIn(text) && !CREDIT_VERBS.containsMatchIn(text) -> false
-            CREDIT_VERBS.containsMatchIn(text) && DEBIT_VERBS.containsMatchIn(text) -> {
-                // e.g. "credited to your account after debiting card" — credit is the outcome.
-                val creditIdx = CREDIT_VERBS.find(text)!!.range.first
-                val debitIdx = DEBIT_VERBS.find(text)!!.range.first
-                creditIdx < debitIdx
-            }
-            else -> false
-        }
-        val typeClear = CREDIT_VERBS.containsMatchIn(text) || DEBIT_VERBS.containsMatchIn(text)
+        val isCredit = detectDirection(text)
+        val typeClear = isDirectionExplicit(text)
 
         val merchant = extractMerchant(text)
-        val accountHint = ACCOUNT_HINT.find(text)?.groupValues?.get(1)?.uppercase(Locale.ROOT)
+        val accountHint = extractAccountHint(text)
         val timestamp = extractDate(text) ?: postTimeMs
 
         val isHeuristic = !typeClear
@@ -135,6 +149,30 @@ object UniversalParser {
         )
     }
 
+    private fun directionText(text: String): String =
+        CREDIT_CARD_COLLOCATION.replace(text, "ccard")
+
+    private fun detectDirection(text: String): Boolean {
+        val body = directionText(text)
+        val credit = CREDIT_VERBS.containsMatchIn(body)
+        val debit = DEBIT_VERBS.containsMatchIn(body)
+        return when {
+            credit && !debit -> true
+            debit && !credit -> false
+            credit && debit -> {
+                // e.g. "credited to your account after debiting card" — first
+                // verb is the outcome.
+                CREDIT_VERBS.find(body)!!.range.first < DEBIT_VERBS.find(body)!!.range.first
+            }
+            else -> false
+        }
+    }
+
+    private fun isDirectionExplicit(text: String): Boolean {
+        val body = directionText(text)
+        return CREDIT_VERBS.containsMatchIn(body) || DEBIT_VERBS.containsMatchIn(body)
+    }
+
     /** Currency marker position varies by institution: prefix ("Rs 120") or suffix ("120 INR"). */
     private data class AmountRule(val regex: Regex, val currencyGroup: Int, val valueGroup: Int)
 
@@ -145,12 +183,27 @@ object UniversalParser {
 
     private fun findAmount(text: String): Pair<Double, String>? {
         for (rule in amountRules) {
-            val match = rule.regex.find(text) ?: continue
-            val value = match.groupValues[rule.valueGroup].replace(",", "").toDoubleOrNull() ?: continue
-            if (value <= 0.0) continue
-            return value to normalizeCurrency(match.groupValues[rule.currencyGroup])
+            for (match in rule.regex.findAll(text)) {
+                val currencyToken = match.groupValues[rule.currencyGroup]
+                val rawValue = match.groupValues[rule.valueGroup]
+                val value = parseMoneyValue(rawValue, currencyToken) ?: continue
+                if (value <= 0.0 || value > MAX_AMOUNT) continue
+                return value to normalizeCurrency(currencyToken)
+            }
         }
         return null
+    }
+
+    /**
+     * "1,234,567" is thousands-grouped; a single trailing ",90" is a decimal
+     * comma in European formats ("EUR 9,90"). Everything else is rejected so
+     * malformed values never reach the ledger.
+     */
+    private fun parseMoneyValue(raw: String, currencyToken: String): Double? {
+        val isEuropean = currencyToken.uppercase(Locale.ROOT).trimEnd('.') in setOf("EUR", "€")
+        val decimalComma = isEuropean && Regex("""^\d+,\d{2}$""").matches(raw)
+        val cleaned = if (decimalComma) raw.replace(",", ".") else raw.replace(",", "")
+        return cleaned.toDoubleOrNull()
     }
 
     private fun normalizeCurrency(token: String): String = when (token.uppercase(Locale.ROOT).trimEnd('.')) {
@@ -158,6 +211,11 @@ object UniversalParser {
         "€", "EUR" -> "EUR"
         "£", "GBP" -> "GBP"
         else -> "INR"
+    }
+
+    private fun extractAccountHint(text: String): String? {
+        if (FULL_PAN.containsMatchIn(text)) return null
+        return ACCOUNT_HINT.find(text)?.groupValues?.get(1)?.uppercase(Locale.ROOT)
     }
 
     fun extractMerchant(text: String): String {
@@ -173,7 +231,10 @@ object UniversalParser {
 
         CAPS_RUN.findAll(text)
             .map { it.groupValues[1].trim() }
-            .filter { run -> run.split(" ").none { it.replace(Regex("""[^A-Z0-9]"""), "") in NETWORK_ACRONYMS } }
+            .filter { run ->
+                run.length <= 40 &&
+                    run.split(" ").none { it.replace(Regex("""[^A-Z0-9]"""), "") in NETWORK_ACRONYMS }
+            }
             .maxByOrNull { it.length }
             ?.let { if (it.length >= 3) return it }
 
@@ -194,7 +255,11 @@ object UniversalParser {
             parts.removeAt(0)
         }
         val candidate = parts.joinToString(" ").trim().trimEnd('.', '-', ' ')
-        return candidate.takeIf { it.length >= 2 && it.lowercase(Locale.ROOT) !in TRAILING_STOPWORDS }
+        if (candidate.length < 2) return null
+        if (candidate.lowercase(Locale.ROOT) in TRAILING_STOPWORDS) return null
+        // "at 10:30" must not mint a merchant "10" — payees contain letters.
+        if (candidate.none { it.isLetter() }) return null
+        return candidate
     }
 
     private fun extractDate(text: String): Long? {
@@ -203,7 +268,7 @@ object UniversalParser {
                 val day = m.groupValues[1].toInt()
                 val month = LocalDate.parse(
                     "01 ${m.groupValues[2]} 2020",
-                    DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.ENGLISH),
+                    MONTH_FORMATTER,
                 ).monthValue
                 val year = m.groupValues[3].takeIf { it.isNotEmpty() }?.toInt()?.let { normalizeYear(it) }
                     ?: LocalDate.now(ZoneId.systemDefault()).year
@@ -214,18 +279,27 @@ object UniversalParser {
             }
         }
         DATE_DMY.find(text)?.let { m ->
-            runCatching {
-                val day = m.groupValues[1].toInt()
-                val month = m.groupValues[2].toInt()
-                val year = m.groupValues[3].takeIf { it.isNotEmpty() }?.toInt()?.let { normalizeYear(it) }
-                    ?: LocalDate.now(ZoneId.systemDefault()).year
-                if (day in 1..31 && month in 1..12) {
-                    return LocalDate.of(year, month, day)
-                        .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                }
-            }
+            parseDmy(m.groupValues[1], m.groupValues[2], m.groupValues[3])?.let { return it }
+        }
+        DATE_DMY_YEARED.find(text)?.let { m ->
+            parseDmy(m.groupValues[1], m.groupValues[2], m.groupValues[3])?.let { return it }
         }
         return null
+    }
+
+    private fun parseDmy(dayToken: String, monthToken: String, yearToken: String): Long? {
+        return runCatching {
+            val day = dayToken.toInt()
+            val month = monthToken.toInt()
+            val year = yearToken.takeIf { it.isNotEmpty() }?.toInt()?.let { normalizeYear(it) }
+                ?: LocalDate.now(ZoneId.systemDefault()).year
+            if (day in 1..31 && month in 1..12) {
+                LocalDate.of(year, month, day)
+                    .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            } else {
+                null
+            }
+        }.getOrNull()
     }
 
     private fun normalizeYear(y: Int): Int = when {

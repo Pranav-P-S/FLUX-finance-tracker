@@ -8,8 +8,10 @@ import com.flux.app.data.CategoryEntity
 import com.flux.app.data.TrainingSample
 import com.flux.app.engine.TransactionEngine
 import com.flux.app.ml.SeedCorpus
+import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
@@ -21,34 +23,43 @@ import kotlinx.coroutines.launch
 class AppGraph private constructor(val appContext: Context) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    lateinit var db: AppDatabase
-        private set
-    lateinit var engine: TransactionEngine
-        private set
+
+    val db: AppDatabase = Room.databaseBuilder(appContext, AppDatabase::class.java, "flux.db")
+        .addMigrations(*AppDatabase.ALL_MIGRATIONS)
+        .build()
+
+    /** Completes once the seed data is committed; the engine's first model
+     *  build waits on it so it never trains from an empty database. */
+    private val seedReady: Job = scope.launch { seed(appContext) }
+
+    val engine: TransactionEngine = TransactionEngine(db, seedReady)
+
     val bridge by lazy { Bridge(this) }
 
     @Volatile private var messenger: io.flutter.plugin.common.BinaryMessenger? = null
+    @Volatile private var changeChannel: MethodChannel? = null
 
     init {
-        db = Room.databaseBuilder(appContext, AppDatabase::class.java, "flux.db")
-            .addMigrations(AppDatabase.MIGRATION_1_2)
-            .build()
-        engine = TransactionEngine(db)
-        scope.launch { seed(appContext) }
         scope.launch { engine.sweep() }
         scope.launch(Dispatchers.Main) {
             engine.changes.collect {
-                runCatching { messenger?.send(CHANNEL, null) }
+                // Must be a codec-encoded MethodCall: a raw buffer is rejected
+                // by StandardMethodCodec on the Dart side, silently dropping
+                // every change notification.
+                val channel = changeChannel ?: return@collect
+                runCatching { channel.invokeMethod("onTransactionsChanged", null) }
             }
         }
     }
 
     fun attachFlutterEngine(messenger: io.flutter.plugin.common.BinaryMessenger) {
         this.messenger = messenger
+        this.changeChannel = MethodChannel(messenger, CHANNEL)
     }
 
     fun detachFlutterEngine() {
         messenger = null
+        changeChannel = null
     }
 
     private suspend fun seed(context: Context) {

@@ -17,34 +17,56 @@ class FluxApp extends ConsumerStatefulWidget {
   ConsumerState<FluxApp> createState() => _FluxAppState();
 }
 
-class _FluxAppState extends ConsumerState<FluxApp> {
+class _FluxAppState extends ConsumerState<FluxApp> with WidgetsBindingObserver {
   int _tab = 0;
   StreamSubscription<void>? _changesSub;
+  Timer? _refreshDebounce;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Native store mutated (notification ingested, import, triage on the
     // engine side) → refresh every feature that reads from the bridge.
+    // Bursts of ingest events are coalesced into one refresh pass.
     _changesSub = ref.read(bridgeProvider).onTransactionsChanged.listen((_) {
       if (!mounted) return;
-      ref.read(pulseProvider.notifier).refresh();
-      ref.read(inboxProvider.notifier).refresh();
-      ref.read(recentTransactionsProvider.notifier).refresh();
-      ref.read(categoriesProvider.notifier).refresh();
-      ref.read(captureStatusProvider.notifier).refresh();
+      _refreshDebounce?.cancel();
+      _refreshDebounce = Timer(const Duration(milliseconds: 300), () {
+        if (!mounted) return;
+        ref.read(pulseProvider.notifier).refresh();
+        ref.read(inboxProvider.notifier).refresh();
+        ref.read(recentTransactionsProvider.notifier).refresh();
+        ref.read(categoriesProvider.notifier).refresh();
+        ref.read(captureStatusProvider.notifier).refresh();
+      });
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from system settings (notification access, battery) or from
+    // the background: capture status may have changed while we were away.
+    if (state == AppLifecycleState.resumed) {
+      ref.read(captureStatusProvider.notifier).refresh();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _changesSub?.cancel();
+    _refreshDebounce?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final inboxCount = ref.watch(inboxProvider).value?.length ?? 0;
+    // select: the shell only rebuilds when the badge count changes, not on
+    // every equal-length inbox refresh.
+    final inboxCount = ref.watch(
+      inboxProvider.select((state) => state.value?.length ?? 0),
+    );
 
     return MaterialApp(
       title: 'Flux',

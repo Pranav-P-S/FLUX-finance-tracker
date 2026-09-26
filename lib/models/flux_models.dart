@@ -3,6 +3,14 @@ import 'package:flutter/material.dart';
 /// Dart mirrors of the entities exchanged with the Android engine over the
 /// platform bridge.
 
+/// Tolerant decoders for platform-channel maps: the native side evolves
+/// independently, and one malformed field must degrade to a default instead
+/// of throwing a cast error that rejects an entire payload.
+int? _asInt(Object? v) => v is num ? v.toInt() : int.tryParse('$v');
+double? _asDouble(Object? v) => v is num ? v.toDouble() : double.tryParse('$v');
+bool _asBool(Object? v) => v == true || v == 'true';
+String? _asString(Object? v) => v is String? ? v : null;
+
 /// Lifecycle of a money event, mirroring the Kotlin TransactionKind.
 enum TransactionKind {
   purchase('purchase'),
@@ -56,19 +64,19 @@ class Transaction {
 
   factory Transaction.fromMap(Map<Object?, Object?> map) {
     return Transaction(
-      id: (map['id'] as num).toInt(),
-      amount: (map['amount'] as num).toDouble(),
-      currency: map['currency'] as String? ?? 'INR',
-      merchant: map['merchant'] as String? ?? 'Unknown',
-      accountHint: map['accountHint'] as String?,
-      timestamp: (map['timestamp'] as num).toInt(),
-      category: map['category'] as String? ?? 'uncategorized',
-      categoryConfidence: (map['categoryConfidence'] as num?)?.toDouble() ?? 0,
-      needsReview: map['needsReview'] as bool? ?? false,
-      parseMethod: map['parseMethod'] as String? ?? '',
-      kind: TransactionKind.from(map['kind'] as String?),
-      sourcePackage: map['sourcePackage'] as String? ?? '',
-      rawText: map['rawText'] as String? ?? '',
+      id: _asInt(map['id']) ?? 0,
+      amount: _asDouble(map['amount']) ?? 0,
+      currency: _asString(map['currency']) ?? 'INR',
+      merchant: _asString(map['merchant']) ?? 'Unknown',
+      accountHint: _asString(map['accountHint']),
+      timestamp: _asInt(map['timestamp']) ?? 0,
+      category: _asString(map['category']) ?? 'uncategorized',
+      categoryConfidence: _asDouble(map['categoryConfidence']) ?? 0,
+      needsReview: _asBool(map['needsReview']),
+      parseMethod: _asString(map['parseMethod']) ?? '',
+      kind: TransactionKind.from(_asString(map['kind'])),
+      sourcePackage: _asString(map['sourcePackage']) ?? '',
+      rawText: _asString(map['rawText']) ?? '',
     );
   }
 }
@@ -91,15 +99,16 @@ class FluxCategory {
   });
 
   factory FluxCategory.fromMap(Map<Object?, Object?> map) {
+    final id = _asString(map['id']) ?? '';
     return FluxCategory(
-      id: map['id'] as String,
-      label: map['label'] as String? ?? map['id'] as String,
-      color: Color((map['color'] as num?)?.toInt() ?? 0xFF64748B),
-      icon: map['icon'] as String? ?? 'category',
+      id: id,
+      label: _asString(map['label']) ?? (id.isEmpty ? 'Unknown' : id),
+      color: Color(_asInt(map['color']) ?? 0xFF64748B),
+      icon: _asString(map['icon']) ?? 'category',
       keywords:
           (map['keywords'] as List<Object?>?)?.whereType<String>().toList() ??
           const [],
-      isDefault: map['isDefault'] as bool? ?? false,
+      isDefault: _asBool(map['isDefault']),
     );
   }
 }
@@ -120,11 +129,11 @@ class PulseSummary {
   });
 
   factory PulseSummary.fromMap(Map<Object?, Object?> map) => PulseSummary(
-    netBalance: (map['netBalance'] as num).toDouble(),
-    totalCredit: (map['totalCredit'] as num).toDouble(),
-    totalDebit: (map['totalDebit'] as num).toDouble(),
-    txCount: (map['txCount'] as num).toInt(),
-    pendingReview: (map['pendingReview'] as num).toInt(),
+    netBalance: _asDouble(map['netBalance']) ?? 0,
+    totalCredit: _asDouble(map['totalCredit']) ?? 0,
+    totalDebit: _asDouble(map['totalDebit']) ?? 0,
+    txCount: _asInt(map['txCount']) ?? 0,
+    pendingReview: _asInt(map['pendingReview']) ?? 0,
   );
 }
 
@@ -140,9 +149,9 @@ class CategorySpend {
   });
 
   factory CategorySpend.fromMap(Map<Object?, Object?> map) => CategorySpend(
-    categoryId: map['categoryId'] as String,
-    total: (map['total'] as num).toDouble(),
-    count: (map['count'] as num).toInt(),
+    categoryId: _asString(map['categoryId']) ?? 'uncategorized',
+    total: _asDouble(map['total']) ?? 0,
+    count: _asInt(map['count']) ?? 0,
   );
 }
 
@@ -153,18 +162,25 @@ class DaySpend {
   const DaySpend({required this.day, required this.total});
 
   factory DaySpend.fromMap(Map<Object?, Object?> map) => DaySpend(
-    day: DateTime.parse(map['day'] as String),
-    total: (map['total'] as num).toDouble(),
+    day: DateTime.tryParse(_asString(map['day']) ?? '') ?? DateTime.now(),
+    total: _asDouble(map['total']) ?? 0,
   );
 }
 
-/// Compact, sign-aware money formatting. INR abbreviates crores of rupees and
-/// lakhs as is conventional for Indian banking; other currencies stay numeric.
+/// Compact, sign-aware money formatting. INR abbreviates crores/lakhs as is
+/// conventional for Indian banking; other currencies stay numeric.
 String formatMoney(double value, {String currency = 'INR'}) {
   const symbols = {'INR': '₹', 'USD': r'$', 'EUR': '€', 'GBP': '£'};
   final symbol = symbols[currency] ?? '₹';
+  if (value.isNaN || value.isInfinite) return '${symbol}0';
   final sign = value < 0 ? '-' : '';
   final abs = value.abs();
+
+  if (currency == 'INR' && abs >= 10000000) {
+    final crores = abs / 10000000;
+    final text = crores.toStringAsFixed(crores >= 10 ? 1 : 2);
+    return '$sign$symbol${text}Cr';
+  }
 
   if (currency == 'INR' && abs >= 100000) {
     final lakhs = abs / 100000;

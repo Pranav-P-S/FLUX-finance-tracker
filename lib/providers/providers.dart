@@ -15,6 +15,12 @@ final dataChangesProvider = StreamProvider<void>(
   (ref) => ref.watch(bridgeProvider).onTransactionsChanged,
 );
 
+/// Applies a background refresh result without dropping already-loaded data:
+/// one transient channel failure must keep the stale screen instead of
+/// blanking it with an error. Errors only surface when there is no data.
+AsyncValue<T> mergedRefresh<T>(AsyncValue<T> current, AsyncValue<T> next) =>
+    next.hasError && current.hasValue ? current : next;
+
 class PulseController extends AsyncNotifier<PulseSummary> {
   @override
   Future<PulseSummary> build() => ref.watch(bridgeProvider).pulseSummary();
@@ -22,9 +28,10 @@ class PulseController extends AsyncNotifier<PulseSummary> {
   /// Re-fetches without dropping the current data, so background refreshes
   /// never flash a loading state over populated screens.
   Future<void> refresh() async {
-    state = await AsyncValue.guard(
+    final next = await AsyncValue.guard(
       () => ref.read(bridgeProvider).pulseSummary(),
     );
+    state = mergedRefresh(state, next);
   }
 }
 
@@ -40,9 +47,10 @@ class RecentTransactionsController extends AsyncNotifier<List<Transaction>> {
       ref.watch(bridgeProvider).transactionsPage(page: 0, pageSize: 50);
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(
+    final next = await AsyncValue.guard(
       () => ref.read(bridgeProvider).transactionsPage(page: 0, pageSize: 50),
     );
+    state = mergedRefresh(state, next);
   }
 }
 
@@ -66,7 +74,8 @@ class InboxController extends AsyncNotifier<List<Transaction>> {
   }
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(() => ref.read(bridgeProvider).inbox());
+    final next = await AsyncValue.guard(() => ref.read(bridgeProvider).inbox());
+    state = mergedRefresh(state, next);
   }
 }
 
@@ -89,7 +98,10 @@ class CategoriesController extends AsyncNotifier<List<FluxCategory>> {
   }
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(() => ref.read(bridgeProvider).categories());
+    final next = await AsyncValue.guard(
+      () => ref.read(bridgeProvider).categories(),
+    );
+    state = mergedRefresh(state, next);
   }
 }
 
@@ -105,11 +117,14 @@ class LensData {
 }
 
 class LensController extends AsyncNotifier<LensData> {
-  final DateTime month;
-  LensController(this.month);
+  /// Normalized to the first of the month so the same visible month always
+  /// maps to one provider key (and one cache entry), never two.
+  LensController(DateTime rawMonth)
+    : month = DateTime(rawMonth.year, rawMonth.month, 1);
 
-  @override
-  Future<LensData> build() async {
+  final DateTime month;
+
+  Future<LensData> _load() async {
     final start = DateTime(month.year, month.month, 1);
     final end = DateTime(month.year, month.month + 1, 1);
     final bridge = ref.watch(bridgeProvider);
@@ -122,6 +137,14 @@ class LensController extends AsyncNotifier<LensData> {
       end.millisecondsSinceEpoch,
     );
     return LensData(byCategory: byCategory, byDay: byDay);
+  }
+
+  @override
+  Future<LensData> build() => _load();
+
+  Future<void> refresh() async {
+    final next = await AsyncValue.guard(_load);
+    state = mergedRefresh(state, next);
   }
 }
 
@@ -150,13 +173,14 @@ class CaptureStatusController extends AsyncNotifier<CaptureStatus> {
   }
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(() async {
+    final next = await AsyncValue.guard(() async {
       final bridge = ref.read(bridgeProvider);
       return CaptureStatus(
         notificationAccess: await bridge.notificationAccessGranted(),
         batteryOptimized: await bridge.ignoringBatteryOptimizations(),
       );
     });
+    state = mergedRefresh(state, next);
   }
 }
 

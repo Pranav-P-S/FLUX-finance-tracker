@@ -16,12 +16,14 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.38.0
           cache: true
 
+      # AGP 9.x requires a JDK 21 floor; 17 breaks the Android build.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Install dependencies
         run: flutter pub get
@@ -39,3 +41,8 @@ jobs:
         run: |
           cd android
           ./gradlew :app:testDebugUnitTest
+
+      # The release type (R8, resources, manifest merge, signing config) must
+      # compile on every push; unsigned release APK, debug-key fallback.
+      - name: Build release APK
+        run: flutter build apk --release

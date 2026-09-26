@@ -188,7 +188,7 @@ class _NeonPiePainter extends CustomPainter {
   @override
   bool shouldRepaint(_NeonPiePainter oldDelegate) =>
       oldDelegate.progress != progress ||
-      oldDelegate.slices != slices ||
+      !listEquals(oldDelegate.slices, slices) ||
       oldDelegate.centerValue != centerValue;
 }
 
@@ -314,5 +314,5 @@ class _HistogramPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_HistogramPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.bars != bars;
+      oldDelegate.progress != progress || !listEquals(oldDelegate.bars, bars);
 }

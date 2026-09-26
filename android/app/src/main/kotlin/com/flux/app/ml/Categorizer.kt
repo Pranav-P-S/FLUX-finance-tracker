@@ -1,6 +1,7 @@
 package com.flux.app.ml
 
 import com.flux.app.data.CategoryEntity
+import java.util.Locale
 
 /**
  * Two-level categorization: a fuzzy merchant dictionary answers first with high
@@ -23,14 +24,15 @@ class Categorizer(
 
     private val dictionary: List<DictEntry> = categories
         .filter { it.id != "uncategorized" }
-        .flatMap { c -> c.keywords.filter { it.length >= 3 }.map { DictEntry(c.id, it.lowercase()) } }
+        .flatMap { c -> c.keywords.filter { it.length >= 3 }.map { DictEntry(c.id, it.lowercase(Locale.ROOT)) } }
         .sortedByDescending { it.keyword.length }
 
     /** Returns a categorizer whose model has additionally learned one example. */
     fun withTraining(text: String, categoryId: String): Categorizer =
         Categorizer(categories, model?.updated(LabeledSample(text, categoryId)))
 
-    fun categorize(merchant: String, rawText: String): Decision {        val merchantLower = merchant.lowercase().trim()
+    fun categorize(merchant: String, rawText: String): Decision {
+        val merchantLower = merchant.lowercase(Locale.ROOT).trim()
 
         // Level 1 — longest keyword wins (e.g. "indian oil" beats "oil").
         dictionary.firstOrNull { merchantLower.contains(it.keyword) }?.let {

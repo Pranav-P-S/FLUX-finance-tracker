@@ -16,6 +16,7 @@ class PulseScreen extends ConsumerWidget {
     final pulse = ref.watch(pulseProvider);
     final txs = ref.watch(recentTransactionsProvider);
     final capture = ref.watch(captureStatusProvider);
+    final baseCurrency = ref.watch(baseCurrencyProvider).value ?? 'INR';
 
     return RefreshIndicator(
       color: FluxTheme.accent,
@@ -53,7 +54,7 @@ class PulseScreen extends ConsumerWidget {
                 style: const TextStyle(color: FluxTheme.debt),
               ),
             ),
-            data: (p) => _PulseHero(summary: p),
+            data: (p) => _PulseHero(summary: p, currency: baseCurrency),
           ),
           const SizedBox(height: 18),
           _SectionTitle('Recent activity'),
@@ -152,11 +153,11 @@ class _Header extends StatelessWidget {
 
 class _PulseHero extends StatelessWidget {
   final PulseSummary summary;
-  const _PulseHero({required this.summary});
+  final String currency;
+  const _PulseHero({required this.summary, required this.currency});
 
   @override
   Widget build(BuildContext context) {
-    final currency = 'INR';
     return GlassCard(
       margin: const EdgeInsets.only(top: 14),
       padding: const EdgeInsets.all(24),

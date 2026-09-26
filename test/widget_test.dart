@@ -39,6 +39,37 @@ void main() {
     expect(formatMoney(12.5, currency: 'USD'), r'$12.50');
   });
 
+  test('formatMoney abbreviates crores and tolerates NaN', () {
+    expect(formatMoney(25000000), '₹2.50Cr');
+    expect(formatMoney(150000000), '₹15.0Cr');
+    // One malformed platform message must not format as "₹NaN".
+    expect(formatMoney(double.nan), '₹0');
+  });
+
+  test('Transaction.fromMap survives a malformed platform payload', () {
+    // The native side is versioned independently: missing/corrupt fields
+    // must never throw a cast error that blanks a whole screen.
+    final tx = Transaction.fromMap(const {
+      'id': 'not-a-number',
+      'amount': null,
+      'timestamp': true,
+      'currency': 42,
+    });
+    expect(tx.id, 0);
+    expect(tx.amount, 0);
+    expect(tx.currency, 'INR');
+    expect(tx.merchant, 'Unknown');
+    expect(tx.category, 'uncategorized');
+    expect(tx.timestamp, 0);
+  });
+
+  test('PulseSummary.fromMap survives an empty payload', () {
+    final summary = PulseSummary.fromMap(const {});
+    expect(summary.netBalance, 0);
+    expect(summary.txCount, 0);
+    expect(summary.pendingReview, 0);
+  });
+
   testWidgets('TxTile renders merchant, sign-aware amount and category', (
     tester,
   ) async {

@@ -128,4 +128,88 @@ class UniversalParserTest {
         assertNotNull(parsed)
         assertTrue(parsed!!.timestamp != now)
     }
+
+    // ---- Regressions from the audit ----
+
+    @Test
+    fun `credit card debit is not income`() {
+        val parsed = UniversalParser.parse(
+            "Your credit card ending 4521 was debited Rs 1,499.00 for AMAZON PURCHASE",
+            now,
+        )!!
+        assertTrue(!parsed.isCredit)
+        assertEquals("generic_debit", parsed.ruleId)
+    }
+
+    @Test
+    fun `credit card charge is not income regardless of verb order`() {
+        val parsed = UniversalParser.parse(
+            "Rs 299 charged on your credit card XX8842 for SPOTIFY",
+            now,
+        )!!
+        assertTrue(!parsed.isCredit)
+    }
+
+    @Test
+    fun `slash idioms like 24_7 and EMI 2_12 are not dates`() {
+        val parsed = UniversalParser.parse(
+            "Rs 200.00 debited from A/c XX8842. Services available 24/7. EMI 2/12 done",
+            now,
+        )!!
+        assertEquals(now, parsed.timestamp)
+    }
+
+    @Test
+    fun `keyword-less dates with a year still parse`() {
+        val parsed = UniversalParser.parse("Rs 200.00 debited towards SHOP 13/09/2026 Txn OK", now)
+        assertNotNull(parsed)
+        assertTrue(parsed!!.timestamp != now)
+    }
+
+    @Test
+    fun `european decimal comma parses for EUR`() {
+        val parsed = UniversalParser.parse("EUR 9,90 debited for SUBSCRIPTION", now)!!
+        assertEquals(9.90, parsed.amount, 0.001)
+        assertEquals("EUR", parsed.currency)
+    }
+
+    @Test
+    fun `comma thousands still parse for INR`() {
+        val parsed = UniversalParser.parse("Rs 12,450 debited to SWIGGY", now)!!
+        assertEquals(12450.0, parsed.amount, 0.001)
+    }
+
+    @Test
+    fun `yours 100 is not an amount`() {
+        assertNull(UniversalParser.parse("This offer is truly yours 100 percent guaranteed", now))
+    }
+
+    @Test
+    fun `absurd digit runs are rejected`() {
+        assertNull(UniversalParser.parse("Rs 999999999999999999 debited to SOMETHING", now))
+    }
+
+    @Test
+    fun `clock times do not become merchants`() {
+        val parsed = UniversalParser.parse("Rs 100 debited to account at 10:30 today", now)
+        assertNotNull(parsed)
+        assertTrue(parsed!!.merchant != "10")
+    }
+
+    @Test
+    fun `upper case month names parse`() {
+        val parsed = UniversalParser.parse("Rs 100 debited to TEST on 15 MAR 2026", now)
+        assertNotNull(parsed)
+        assertTrue(parsed!!.timestamp != now)
+    }
+
+    @Test
+    fun `full pan never becomes an account hint`() {
+        val parsed = UniversalParser.parse(
+            "Card 4321 9876 5432 1098 charged Rs 500 at TEST MERCHANT",
+            now,
+        )
+        assertNotNull(parsed)
+        assertNull(parsed!!.accountHint)
+    }
 }

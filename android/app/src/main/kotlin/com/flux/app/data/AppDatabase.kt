@@ -2,9 +2,9 @@ package com.flux.app.data
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import androidx.room.TypeConverters
 
 @Database(
     entities = [
@@ -13,8 +13,8 @@ import androidx.room.TypeConverters
         TrainingSample::class,
         SettingEntry::class,
     ],
-    version = 2,
-    exportSchema = false,
+    version = 3,
+    exportSchema = true,
 )
 @TypeConverters(KeywordConverter::class)
 abstract class AppDatabase : RoomDatabase() {
@@ -31,5 +31,25 @@ abstract class AppDatabase : RoomDatabase() {
                 )
             }
         }
+
+        /** v3: query-serving indices; the entity's index list describes them. */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_transactions_needsReview_timestamp` " +
+                        "ON `transactions` (`needsReview`, `timestamp`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_transactions_timestamp` " +
+                        "ON `transactions` (`timestamp`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_transactions_kind_createdAt` " +
+                        "ON `transactions` (`kind`, `createdAt`)"
+                )
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
     }
 }

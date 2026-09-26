@@ -23,7 +23,10 @@ class NaiveBayesClassifier private constructor(
      */
     fun classify(text: String): Classification? {
         if (docCounts.isEmpty() || totalDocs == 0) return null
-        val tokens = tokenize(text).filter { it in vocabulary }
+        // Dedupe exactly like training does: without it, a crafted notification
+        // repeating one token hundreds of times multiplies its likelihood and
+        // forces any category to ~1.0 confidence.
+        val tokens = tokenize(text).toSet().filter { it in vocabulary }
         if (tokens.isEmpty()) return null
         if (docCounts.size == 1) {
             val only = docCounts.entries.first()
@@ -77,9 +80,11 @@ class NaiveBayesClassifier private constructor(
     companion object {
         private val TOKEN_SPLIT = Regex("[^a-z0-9]+")
 
-        /** Lowercase, split on non-alphanumerics, digits collapsed to a single "#" token. */
+        /** Lowercase, split on non-alphanumerics, digits collapsed to a single "#" token.
+         *  Locale-neutral: a default-locale lowercase would corrupt the vocabulary
+         *  on devices whose language recases I/i (Turkish). */
         fun tokenize(text: String): List<String> =
-            text.lowercase()
+            text.lowercase(java.util.Locale.ROOT)
                 .split(TOKEN_SPLIT)
                 .filter { it.length >= 2 }
                 .map { if (it.all { c -> c.isDigit() }) "#" else it }

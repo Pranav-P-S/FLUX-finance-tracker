@@ -1,5 +1,6 @@
 package com.flux.app.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -23,7 +24,15 @@ object TransactionKind {
  */
 @Entity(
     tableName = "transactions",
-    indices = [Index(value = ["hash"], unique = true)],
+    indices = [
+        Index(value = ["hash"], unique = true),
+        // Inbox: WHERE needsReview = 1 ORDER BY timestamp DESC.
+        Index(value = ["needsReview", "timestamp"]),
+        // Ledger pages and date-range aggregates.
+        Index(value = ["timestamp"]),
+        // Holds sweep and TTL expiry.
+        Index(value = ["kind", "createdAt"]),
+    ],
 )
 data class TransactionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -39,6 +48,9 @@ data class TransactionEntity(
     val categoryConfidence: Double,
     val needsReview: Boolean,
     val parseMethod: String,
+    // The defaultValue mirrors MIGRATION_1_2's SQL DEFAULT so fresh installs
+    // and migrated databases share one schema.
+    @ColumnInfo(defaultValue = "'${TransactionKind.PURCHASE}'")
     val kind: String = TransactionKind.PURCHASE,
     val createdAt: Long,
 )

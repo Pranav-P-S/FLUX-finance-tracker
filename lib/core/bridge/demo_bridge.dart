@@ -19,12 +19,16 @@ class DemoBridge implements FluxBridge {
   Future<List<Transaction>> transactionsPage({
     int page = 0,
     int pageSize = 50,
-  }) async =>
-      DemoData.transactions.skip(page * pageSize).take(pageSize).toList();
+  }) async {
+    // Mirror the native contract: newest first.
+    final sorted = [...DemoData.transactions]
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return sorted.skip(page * pageSize).take(pageSize).toList();
+  }
 
   @override
   Future<List<Transaction>> inbox({int limit = 100}) async =>
-      DemoData.transactions.where((t) => t.needsReview).toList();
+      DemoData.transactions.where((t) => t.needsReview).take(limit).toList();
 
   @override
   Future<void> categorize(int id, String categoryId) async {}

@@ -28,6 +28,9 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
     suspend fun all(): List<TransactionEntity>
 
+    @Query("SELECT * FROM transactions WHERE id = :id")
+    suspend fun byId(id: Long): TransactionEntity?
+
     @Query("SELECT COUNT(*) FROM transactions")
     suspend fun count(): Int
 
@@ -41,6 +44,52 @@ interface TransactionDao {
 
     @Query("SELECT COALESCE(SUM(-amount), 0) FROM transactions WHERE amount < 0 AND kind != 'pending'")
     suspend fun totalDebit(): Double
+
+    /** Net/credit/debit restricted to the base currency: foreign-currency rows
+     *  are unconverted and must never inflate the base-currency totals. */
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind != 'pending' AND currency = :currency")
+    suspend fun netInCurrency(currency: String): Double
+
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0 AND kind = 'purchase' AND currency = :currency")
+    suspend fun totalCreditInCurrency(currency: String): Double
+
+    @Query("SELECT COALESCE(SUM(-amount), 0) FROM transactions WHERE amount < 0 AND kind != 'pending' AND currency = :currency")
+    suspend fun totalDebitInCurrency(currency: String): Double
+
+    /**
+     * Per-category spend aggregated in SQL: debits add, refunds for the same
+     * category subtract, holds are excluded, income rows are ignored, and
+     * foreign-currency rows never enter base-currency totals.
+     */
+    @Query(
+        """
+        SELECT category AS categoryId,
+               COALESCE(SUM(CASE WHEN amount < 0 OR kind = 'refund' THEN -amount ELSE 0 END), 0) AS total,
+               SUM(CASE WHEN amount < 0 OR kind = 'refund' THEN 1 ELSE 0 END) AS count
+        FROM transactions
+        WHERE kind != 'pending'
+          AND timestamp BETWEEN :start AND :end
+          AND currency = :currency
+          AND (amount < 0 OR kind = 'refund')
+        GROUP BY category
+        """,
+    )
+    suspend fun spendByCategory(start: Long, end: Long, currency: String): List<CategorySpendRow>
+
+    @Query(
+        """
+        SELECT strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime') AS day,
+               COALESCE(SUM(-amount), 0) AS total
+        FROM transactions
+        WHERE amount < 0
+          AND kind != 'pending'
+          AND timestamp BETWEEN :start AND :end
+          AND currency = :currency
+        GROUP BY day
+        ORDER BY day
+        """,
+    )
+    suspend fun spendByDay(start: Long, end: Long, currency: String): List<DaySpendRow>
 
     @Query("SELECT COUNT(*) FROM transactions WHERE needsReview = 1")
     suspend fun pendingReview(): Int
@@ -112,3 +161,16 @@ interface SettingsDao {
     @Query("SELECT * FROM settings")
     suspend fun all(): List<SettingEntry>
 }
+
+/** Projection row for [TransactionDao.spendByCategory]. */
+data class CategorySpendRow(
+    val categoryId: String,
+    val total: Double,
+    val count: Int,
+)
+
+/** Projection row for [TransactionDao.spendByDay]. */
+data class DaySpendRow(
+    val day: String,
+    val total: Double,
+)

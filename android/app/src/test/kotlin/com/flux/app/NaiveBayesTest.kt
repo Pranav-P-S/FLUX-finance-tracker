@@ -54,4 +54,20 @@ class NaiveBayesTest {
         val after = model.updated(LabeledSample("!!!", "health")).classify("pizza order")!!.categoryId
         assertEquals(before, after)
     }
+
+    @Test
+    fun `repeating one token cannot force a confidence`() {
+        // Crafted notification spamming an in-vocabulary token must not drive
+        // the posterior to ~1.0 and auto-apply (classify dedupes like train).
+        val model = NaiveBayesClassifier.train(
+            listOf(
+                LabeledSample("pizza order delivered hot", "food_drink"),
+                LabeledSample("flight ticket booking confirmed", "travel"),
+            ),
+        )
+        val single = model.classify("pizza")!!
+        val spammed = model.classify(List(300) { "pizza" }.joinToString(" "))!!
+        assertEquals(single.categoryId, spammed.categoryId)
+        assertEquals(single.confidence, spammed.confidence, 1e-9)
+    }
 }

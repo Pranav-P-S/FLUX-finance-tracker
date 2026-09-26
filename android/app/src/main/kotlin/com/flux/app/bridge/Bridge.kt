@@ -3,9 +3,7 @@ package com.flux.app.bridge
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Environment
 import android.os.PowerManager
-import android.provider.MediaStore
 import android.provider.Settings
 import androidx.room.withTransaction
 import com.flux.app.data.AppDatabase
@@ -25,13 +23,18 @@ class Bridge(private val graph: AppGraph) {
         val args = arguments as? Map<*, *> ?: emptyMap<Any?, Any?>()
         val db = graph.db
         return when (method) {
-            "getPulseSummary" -> mapOf(
-                "netBalance" to db.transactions().net(),
-                "totalCredit" to db.transactions().totalCredit(),
-                "totalDebit" to db.transactions().totalDebit(),
-                "txCount" to db.transactions().count(),
-                "pendingReview" to db.transactions().pendingReview(),
-            )
+            // Aggregates are restricted to the base currency: foreign-currency
+            // rows are unconverted and must not distort base-currency totals.
+            "getPulseSummary" -> {
+                val currency = baseCurrency()
+                mapOf(
+                    "netBalance" to db.transactions().netInCurrency(currency),
+                    "totalCredit" to db.transactions().totalCreditInCurrency(currency),
+                    "totalDebit" to db.transactions().totalDebitInCurrency(currency),
+                    "txCount" to db.transactions().count(),
+                    "pendingReview" to db.transactions().pendingReview(),
+                )
+            }
 
             "getTransactionsPage" -> {
                 val page = (args["page"] as? Number)?.toInt() ?: 0
@@ -52,7 +55,7 @@ class Bridge(private val graph: AppGraph) {
             "categorizeTransaction" -> {
                 val id = (args["id"] as? Number)?.toLong() ?: error("id required")
                 val categoryId = args["categoryId"] as? String ?: error("categoryId required")
-                val tx = db.transactions().all().firstOrNull { it.id == id }
+                val tx = db.transactions().byId(id)
                     ?: error("transaction $id not found")
                 db.transactions().update(
                     tx.copy(
@@ -76,44 +79,38 @@ class Bridge(private val graph: AppGraph) {
                 val end = (args["endMs"] as? Number)?.toLong() ?: Long.MAX_VALUE
                 // Purchases add to a category's spend; refunds for that payee's
                 // category subtract from it. Holds never reach the ledger.
-                val spend = mutableMapOf<String, Double>()
-                val counts = mutableMapOf<String, Int>()
-                db.transactions().range(start, end).filter { it.kind != "pending" }.forEach { tx ->
-                    if (tx.amount < 0) {
-                        spend.merge(tx.category, -tx.amount, Double::plus)
-                        counts.merge(tx.category, 1, Int::plus)
-                    } else if (tx.kind == "refund") {
-                        spend.merge(tx.category, -tx.amount, Double::plus)
-                        counts.merge(tx.category, 1, Int::plus)
-                    }
-                }
-                spend.map { (category, total) ->
+                // Aggregated in SQL — the whole table never leaves SQLite.
+                db.transactions().spendByCategory(start, end, baseCurrency()).map {
                     mapOf(
-                        "categoryId" to category,
-                        "total" to total.coerceAtLeast(0.0),
-                        "count" to (counts[category] ?: 0),
+                        "categoryId" to it.categoryId,
+                        "total" to it.total.coerceAtLeast(0.0),
+                        "count" to it.count,
                     )
                 }
-                    .sortedByDescending { it["total"] as Double }
             }
 
             "getDailySpend" -> {
                 val start = (args["startMs"] as? Number)?.toLong() ?: 0L
                 val end = (args["endMs"] as? Number)?.toLong() ?: Long.MAX_VALUE
-                val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-                db.transactions().range(start, end)
-                    .filter { it.amount < 0 && it.kind != "pending" }
-                    .groupBy { fmt.format(Date(it.timestamp)) }
-                    .map { (day, txs) -> mapOf("day" to day, "total" to txs.sumOf { -it.amount }) }
-                    .sortedBy { it["day"] as String }
+                db.transactions().spendByDay(start, end, baseCurrency()).map {
+                    mapOf("day" to it.day, "total" to it.total)
+                }
             }
 
             "getCategories" -> db.categories().all().map { it.toMap() }
 
             "addCategory" -> {
                 val label = args["label"] as? String ?: error("label required")
-                val id = (args["id"] as? String) ?: label.lowercase(Locale.US)
-                    .replace(Regex("[^a-z0-9]+"), "_").trim('_')
+                var id = (args["id"] as? String) ?: slugify(label)
+                // Slug collisions must never touch existing rows: REPLACE would
+                // silently overwrite a default category and its keywords.
+                val existingIds = db.categories().all().mapTo(HashSet()) { it.id }
+                if (id in existingIds) {
+                    require(args["id"] == null) { "category '$id' already exists" }
+                    var n = 2
+                    while ("$id-$n" in existingIds) n++
+                    id = "$id-$n"
+                }
                 db.categories().upsert(
                     com.flux.app.data.CategoryEntity(
                         id = id,
@@ -150,8 +147,12 @@ class Bridge(private val graph: AppGraph) {
                 val existing = db.categories().all().firstOrNull { it.id == id }
                     ?: error("category $id not found")
                 if (existing.isDefault) error("default categories cannot be deleted")
-                db.categories().reassignTransactionsOnDelete(id)
-                db.categories().delete(existing)
+                // Reassignment and removal are one transaction: a crash between
+                // them must not orphan transactions on a deleted category.
+                db.withTransaction {
+                    db.categories().reassignTransactionsOnDelete(id)
+                    db.categories().delete(existing)
+                }
                 graph.engine.retrain()
                 true
             }
@@ -206,6 +207,9 @@ class Bridge(private val graph: AppGraph) {
             }
 
             "simulateNotification" -> {
+                // Test hook that injects synthetic transactions into the real
+                // pipeline — must never exist in a release build.
+                if (!com.flux.app.BuildConfig.DEBUG) error("simulateNotification is debug-only")
                 val text = args["text"] as? String ?: error("text required")
                 val pkg = args["packageName"] as? String ?: "flux.simulator"
                 val result = graph.engine.ingest(text, pkg, System.currentTimeMillis())
@@ -238,6 +242,13 @@ class Bridge(private val graph: AppGraph) {
     }
 
     private fun graphContext(): Context = graph.appContext
+
+    private suspend fun baseCurrency(): String =
+        graph.db.settings().get("base_currency") ?: "INR"
+
+    private fun slugify(label: String): String =
+        label.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "_").trim('_')
+            .ifEmpty { "category" }
 
     private fun isNotificationAccessGranted(context: Context): Boolean {
         val listeners = Settings.Secure.getString(
@@ -319,32 +330,16 @@ class Bridge(private val graph: AppGraph) {
             writer.endObject()
         }
 
-        val path = if (Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED &&
-            android.os.Build.VERSION.SDK_INT >= 29
-        ) {
-            val values = android.content.ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, "application/json")
+        // App-private storage only: a full financial ledger must never land in
+        // shared Downloads where other apps' media permission can read it.
+        val dir = context.getExternalFilesDir(null) ?: context.filesDir
+        val file = File(dir, name)
+        file.outputStream().use { out ->
+            java.io.BufferedWriter(java.io.OutputStreamWriter(out, Charsets.UTF_8)).use { buffered ->
+                android.util.JsonWriter(buffered).use { writer -> writeArchive(writer) }
             }
-            val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: error("could not create download entry")
-            context.contentResolver.openOutputStream(uri)!!.use { out ->
-                java.io.BufferedWriter(java.io.OutputStreamWriter(out, Charsets.UTF_8)).use { buffered ->
-                    android.util.JsonWriter(buffered).use { writer -> writeArchive(writer) }
-                }
-            }
-            uri.toString()
-        } else {
-            val dir = context.getExternalFilesDir(null) ?: context.filesDir
-            val file = File(dir, name)
-            file.outputStream().use { out ->
-                java.io.BufferedWriter(java.io.OutputStreamWriter(out, Charsets.UTF_8)).use { buffered ->
-                    android.util.JsonWriter(buffered).use { writer -> writeArchive(writer) }
-                }
-            }
-            file.absolutePath
         }
-        return mapOf("path" to path)
+        return mapOf("path" to file.absolutePath)
     }
 
     /**

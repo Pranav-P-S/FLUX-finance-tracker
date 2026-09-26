@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,12 +17,33 @@ class LensScreen extends ConsumerStatefulWidget {
 }
 
 class _LensScreenState extends ConsumerState<LensScreen> {
-  late DateTime _month = DateTime.now();
+  // Normalized to the first of the month: matches the provider key (which is
+  // normalized too) so navigation never forks the cache for one month.
+  late DateTime _month = DateTime(DateTime.now().year, DateTime.now().month);
+  StreamSubscription<void>? _changesSub;
+
+  @override
+  void initState() {
+    super.initState();
+    // Lens is not in the shell-wide fan-out: it refreshes itself when the
+    // native store mutates, so analytics never freeze for the session.
+    _changesSub = ref
+        .read(bridgeProvider)
+        .onTransactionsChanged
+        .listen((_) => ref.read(lensProvider(_month).notifier).refresh());
+  }
+
+  @override
+  void dispose() {
+    _changesSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final lens = ref.watch(lensProvider(_month));
     final categories = ref.watch(categoriesProvider).value ?? const [];
+    final baseCurrency = ref.watch(baseCurrencyProvider).value ?? 'INR';
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 110),
@@ -118,7 +141,10 @@ class _LensScreenState extends ConsumerState<LensScreen> {
                           slices: slices,
                           size: 230,
                           centerLabel: 'spent this month',
-                          centerValue: formatMoney(total),
+                          centerValue: formatMoney(
+                            total,
+                            currency: baseCurrency,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 18),
@@ -149,7 +175,10 @@ class _LensScreenState extends ConsumerState<LensScreen> {
                                 ),
                               ),
                               Text(
-                                formatMoney(slice.value),
+                                formatMoney(
+                                  slice.value,
+                                  currency: baseCurrency,
+                                ),
                                 style: const TextStyle(
                                   fontWeight: FontWeight.w700,
                                   fontSize: 13,

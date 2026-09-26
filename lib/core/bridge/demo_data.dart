@@ -147,7 +147,7 @@ abstract final class DemoData {
       rawText: 'HDFC BANK\nRs 500 held as pre-authorization by TAJ HOTELS',
     ),
     _tx(
-      id: 7,
+      id: 9,
       amount: -2199,
       merchant: 'FLIPKART',
       category: 'shopping',
@@ -200,14 +200,15 @@ abstract final class DemoData {
   }
 
   static List<DaySpend> get byDay {
-    final totals = <int, double>{};
+    // Grouped by calendar date, not day-of-month: months must not merge.
+    final totals = <DateTime, double>{};
     for (final t in transactions.where((t) => t.amount < 0 && !t.isPending)) {
-      final d = DateTime.fromMillisecondsSinceEpoch(t.timestamp).day;
-      totals[d] = (totals[d] ?? 0) + -t.amount;
+      final d = DateTime.fromMillisecondsSinceEpoch(t.timestamp);
+      final day = DateTime(d.year, d.month, d.day);
+      totals[day] = (totals[day] ?? 0) + -t.amount;
     }
     return [
-      for (final e in totals.entries)
-        DaySpend(day: DateTime(2026, 9, e.key), total: e.value),
+      for (final e in totals.entries) DaySpend(day: e.key, total: e.value),
     ]..sort((a, b) => a.day.compareTo(b.day));
   }
 }

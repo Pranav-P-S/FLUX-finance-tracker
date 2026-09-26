@@ -1,5 +1,6 @@
 package com.flux.app.engine
 
+import androidx.room.withTransaction
 import com.flux.app.data.AppDatabase
 import com.flux.app.data.TransactionEntity
 import com.flux.app.data.TransactionKind
@@ -8,6 +9,7 @@ import com.flux.app.ml.Categorizer
 import com.flux.app.ml.LabeledSample
 import com.flux.app.ml.NaiveBayesClassifier
 import com.flux.app.parse.UniversalParser
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
@@ -17,8 +19,12 @@ import kotlinx.coroutines.sync.withLock
  * The capture pipeline: filter -> parse -> dedup -> categorize -> store -> notify.
  * All ingests are serialized through a mutex so concurrent notifications keep
  * their insertion order and the in-memory categorizer is built exactly once.
+ *
+ * [seedReady] must complete before the first categorizer build: without it an
+ * early ingest racing the seed writer would train the model on an empty
+ * database and cache the broken model for the lifetime of the process.
  */
-class TransactionEngine(private val db: AppDatabase) {
+class TransactionEngine(private val db: AppDatabase, private val seedReady: Job? = null) {
 
     sealed class IngestResult {
         data object Filtered : IngestResult()
@@ -28,7 +34,10 @@ class TransactionEngine(private val db: AppDatabase) {
     }
 
     private val mutex = Mutex()
-    private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+    private val _changes = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
     val changes: SharedFlow<Unit> = _changes
 
     private var categorizer: Categorizer? = null
@@ -38,14 +47,14 @@ class TransactionEngine(private val db: AppDatabase) {
         mutex.withLock {
             val current = categorizer ?: buildCategorizer().also { categorizer = it }
 
-            val body = text.trim()
+            val body = maskPan(text.trim())
             if (!isCandidate(body)) return@withLock IngestResult.Filtered
 
             val parsed = UniversalParser.parse(body, postTimeMs)
                 ?: return@withLock IngestResult.Unparsed
 
             val amount = if (parsed.isCredit) parsed.amount else -parsed.amount
-            val hash = Dedup.hash(body, sourcePackage)
+            val hash = Dedup.hash(body, sourcePackage, parsed.timestamp)
 
             val kind = when {
                 parsed.isHold -> TransactionKind.PENDING
@@ -77,12 +86,17 @@ class TransactionEngine(private val db: AppDatabase) {
                 createdAt = System.currentTimeMillis(),
             )
 
-            val insertedId = db.transactions().insertAll(listOf(entity))[0]
-            if (insertedId == -1L) return@withLock IngestResult.Duplicate
-
-            if (kind == TransactionKind.PURCHASE && amount < 0) {
-                settleMatchingHold(entity)
+            // Dedup check, insert and hold settlement share one transaction so a
+            // crash can never leave a purchase inserted with its hold unsettled
+            // (or a hold deleted for a purchase that was never stored).
+            val insertedId = db.withTransaction {
+                val id = db.transactions().insertAll(listOf(entity))[0]
+                if (id != -1L && kind == TransactionKind.PURCHASE && amount < 0) {
+                    settleMatchingHold(entity)
+                }
+                id
             }
+            if (insertedId == -1L) return@withLock IngestResult.Duplicate
 
             _changes.tryEmit(Unit)
             IngestResult.Stored(entity.copy(id = insertedId))
@@ -122,9 +136,9 @@ class TransactionEngine(private val db: AppDatabase) {
      */
     suspend fun sweep() {
         mutex.withLock {
-            val cutoff = System.currentTimeMillis() - RAW_TEXT_TTL_MS
-            db.transactions().deletePendingBefore(cutoff)
-            db.transactions().scrubRawTextBefore(cutoff)
+            val now = System.currentTimeMillis()
+            db.transactions().deletePendingBefore(now - PENDING_TTL_MS)
+            db.transactions().scrubRawTextBefore(now - RAW_TEXT_TTL_MS)
         }
     }
 
@@ -134,7 +148,8 @@ class TransactionEngine(private val db: AppDatabase) {
     /**
      * A hold followed by a debit from the same payee is its settlement: a fuel
      * pump authorizes for its maximum and the final charge posts lower. Drop
-     * the hold so only the real charge reaches the totals.
+     * the hold so only the real charge reaches the totals. Runs inside the
+     * caller's database transaction.
      */
     private suspend fun settleMatchingHold(purchase: TransactionEntity) {
         val payee = normalizePayee(purchase.merchant)
@@ -151,9 +166,11 @@ class TransactionEngine(private val db: AppDatabase) {
     }
 
     private fun normalizePayee(value: String): String =
-        value.lowercase().replace(Regex("[^a-z0-9]"), "").ifEmpty { value.lowercase() }
+        value.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, "")
+            .ifEmpty { value.lowercase(java.util.Locale.ROOT) }
 
     private suspend fun buildCategorizer(): Categorizer {
+        seedReady?.join()
         val categories = db.categories().all()
         val samples = db.training().all().map { LabeledSample(it.text, it.categoryId) }
         trainingCount = samples.size
@@ -163,16 +180,28 @@ class TransactionEngine(private val db: AppDatabase) {
 
     private fun isCandidate(text: String): Boolean {
         if (text.length < 8) return false
-        val lower = text.lowercase()
-        if (Regex("""\b(otp|one[\s-]?time\s+password)\b""").containsMatchIn(lower)) return false
-        return true
+        val lower = text.lowercase(java.util.Locale.ROOT)
+        if (OTP_PATTERN.containsMatchIn(lower)) return false
+        // Cheap money-indicator gate before the full parse: without a currency
+        // marker or a transfer verb there is nothing to extract.
+        return MONEY_HINT.containsMatchIn(lower)
     }
+
+    /** Full card numbers are masked before anything is hashed or persisted. */
+    private fun maskPan(text: String): String = PAN_PATTERN.replace(text, "[card]")
 
     companion object {
         private const val MIN_TRAINING_SAMPLES = 10
         private const val DEFAULT_BASE_CURRENCY = "INR"
         private const val PENDING_TTL_MS = 72L * 60 * 60 * 1000
         private const val RAW_TEXT_TTL_MS = 72L * 60 * 60 * 1000
+
+        private val OTP_PATTERN = Regex("""\b(otp|one[\s-]?time\s+password)\b""")
+        private val MONEY_HINT = Regex(
+            """(rs|inr|usd|eur|gbp|rupee|₹|\$|€|£|credit|debit|spent|paid|refund|received)"""
+        )
+        private val NON_ALNUM = Regex("[^a-z0-9]")
+        private val PAN_PATTERN = Regex("""\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}""")
 
         /**
          * Training text keeps the classifier signal — payee and purpose words —

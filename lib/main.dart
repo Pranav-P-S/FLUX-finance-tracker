@@ -19,7 +19,10 @@ void main() {
 }
 
 /// Gate widget: if the Vault has biometric unlock enabled, require a
-/// successful LocalAuthentication prompt before mounting the app shell.
+/// successful LocalAuthentication prompt before mounting the app shell, and
+/// re-lock whenever the app leaves the foreground. The gate fails closed:
+/// plugin or hardware errors land on the lock screen (with a retry), never
+/// on the data.
 class _FluxGate extends ConsumerStatefulWidget {
   const _FluxGate();
 
@@ -27,56 +30,71 @@ class _FluxGate extends ConsumerStatefulWidget {
   ConsumerState<_FluxGate> createState() => _FluxGateState();
 }
 
-class _FluxGateState extends ConsumerState<_FluxGate> {
+class _FluxGateState extends ConsumerState<_FluxGate>
+    with WidgetsBindingObserver {
   bool _unlocked = false;
   bool _checked = false;
+  bool _authInFlight = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkLock();
   }
 
-  Future<void> _checkLock() async {
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Backgrounded with the lock enabled → require biometrics again.
+    if (state == AppLifecycleState.paused && _unlocked && _checked) {
+      _checkLock(requireNow: false);
+    }
+  }
+
+  Future<void> _checkLock({bool requireNow = true}) async {
+    if (_authInFlight) return;
+    _authInFlight = true;
     try {
       final enabled = await ref.read(bridgeProvider).biometricEnabled();
       if (!enabled) {
-        setState(() {
-          _unlocked = true;
-          _checked = true;
-        });
+        _setLocked(locked: false, checked: true);
         return;
       }
-      final auth = LocalAuthentication();
-      final canCheck = await auth.canCheckBiometrics;
-      if (!canCheck) {
-        setState(() {
-          _unlocked = true;
-          _checked = true;
-        });
-        return;
+      if (!requireNow && mounted) {
+        // Coming back from the background: show the lock screen immediately,
+        // then start the prompt.
+        _setLocked(locked: true, checked: true);
       }
-      final ok = await auth.authenticate(
+      final ok = await LocalAuthentication().authenticate(
         localizedReason: 'Unlock Flux to view your Pulse',
-        biometricOnly: true,
+        // Device-credential fallback (PIN/pattern) so users without enrolled
+        // biometrics are never hard-locked out of their own data.
+        biometricOnly: false,
         persistAcrossBackgrounding: true,
       );
-      if (mounted) {
-        setState(() {
-          _unlocked = ok;
-          _checked = true;
-        });
-      }
+      _setLocked(locked: !ok, checked: true);
     } catch (e) {
       debugPrint('Flux gate: $e');
-      // Convenience lock must never lock the user out over a plugin/bridge error.
-      if (mounted) {
-        setState(() {
-          _unlocked = true;
-          _checked = true;
-        });
-      }
+      // Fail closed — including when the setting itself cannot be read. The
+      // lock screen offers an explicit retry; convenience never defeats it.
+      if (mounted) _setLocked(locked: true, checked: true);
+    } finally {
+      _authInFlight = false;
     }
+  }
+
+  void _setLocked({required bool locked, required bool checked}) {
+    if (!mounted) return;
+    setState(() {
+      _unlocked = !locked;
+      _checked = checked;
+    });
   }
 
   @override
@@ -114,7 +132,7 @@ class _FluxGateState extends ConsumerState<_FluxGate> {
                 ),
                 const SizedBox(height: 20),
                 NeuButton(
-                  onTap: _checkLock,
+                  onTap: () => _checkLock(),
                   child: const Text(
                     'Unlock',
                     style: TextStyle(

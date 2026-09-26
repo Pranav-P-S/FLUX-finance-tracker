@@ -30,7 +30,15 @@ class FluxNotificationListener : NotificationListenerService() {
         val graph = AppGraph.get(applicationContext)
         graph.scope.launch {
             val result = graph.engine.ingest(body, sbn.packageName, sbn.postTime)
-            Log.i(TAG, "ingest(${sbn.packageName}) -> $result")
+            // Never log the IngestResult itself: its toString carries the raw
+            // alert text (account digits, balances). Log the verdict only.
+            val verdict = when (result) {
+                is TransactionEngine.IngestResult.Stored -> "stored id=${result.transaction.id}"
+                TransactionEngine.IngestResult.Duplicate -> "duplicate"
+                TransactionEngine.IngestResult.Filtered -> "filtered"
+                TransactionEngine.IngestResult.Unparsed -> "unparsed"
+            }
+            Log.i(TAG, "ingest(${sbn.packageName}) -> $verdict")
             if (result is TransactionEngine.IngestResult.Stored) {
                 runCatching { cancelNotification(sbn.key) }
             }

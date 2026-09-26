@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/services.dart';
 
 import '../../models/flux_models.dart';
@@ -82,6 +83,28 @@ class NativeBridge implements FluxBridge {
         const [];
   }
 
+  /// Per-row defensive decoding: one malformed element must reject only that
+  /// row, never the entire payload (and never the calling screen).
+  static List<Transaction> _parseTransactions(List<Object?> items) => [
+    for (final e in items)
+      if (e is Map) Transaction.fromMap(Map<Object?, Object?>.from(e)),
+  ];
+
+  static List<FluxCategory> _parseCategories(List<Object?> items) => [
+    for (final e in items)
+      if (e is Map) FluxCategory.fromMap(Map<Object?, Object?>.from(e)),
+  ];
+
+  static List<CategorySpend> _parseCategorySpend(List<Object?> items) => [
+    for (final e in items)
+      if (e is Map) CategorySpend.fromMap(Map<Object?, Object?>.from(e)),
+  ];
+
+  static List<DaySpend> _parseDaySpend(List<Object?> items) => [
+    for (final e in items)
+      if (e is Map) DaySpend.fromMap(Map<Object?, Object?>.from(e)),
+  ];
+
   @override
   Future<PulseSummary> pulseSummary() async =>
       PulseSummary.fromMap(await _invokeMap('getPulseSummary'));
@@ -95,19 +118,12 @@ class NativeBridge implements FluxBridge {
       'page': page,
       'pageSize': pageSize,
     });
-    final items = (res['items'] as List<Object?>?) ?? const [];
-    return items
-        .map((e) => Transaction.fromMap(e as Map<Object?, Object?>))
-        .toList();
+    return _parseTransactions((res['items'] as List<Object?>?) ?? const []);
   }
 
   @override
-  Future<List<Transaction>> inbox({int limit = 100}) async {
-    final items = await _invokeList('getInbox', {'limit': limit});
-    return items
-        .map((e) => Transaction.fromMap(e as Map<Object?, Object?>))
-        .toList();
-  }
+  Future<List<Transaction>> inbox({int limit = 100}) async =>
+      _parseTransactions(await _invokeList('getInbox', {'limit': limit}));
 
   @override
   Future<void> categorize(int id, String categoryId) => _invoke<dynamic>(
@@ -120,34 +136,28 @@ class NativeBridge implements FluxBridge {
       _invoke<dynamic>('deleteTransaction', {'id': id});
 
   @override
-  Future<List<CategorySpend>> spendingByCategory(int startMs, int endMs) async {
-    final items = await _invokeList('getSpendingByCategory', {
+  Future<List<CategorySpend>> spendingByCategory(
+    int startMs,
+    int endMs,
+  ) async => _parseCategorySpend(
+    await _invokeList('getSpendingByCategory', {
       'startMs': startMs,
       'endMs': endMs,
-    });
-    return items
-        .map((e) => CategorySpend.fromMap(e as Map<Object?, Object?>))
-        .toList();
-  }
+    }),
+  );
 
   @override
-  Future<List<DaySpend>> dailySpend(int startMs, int endMs) async {
-    final items = await _invokeList('getDailySpend', {
-      'startMs': startMs,
-      'endMs': endMs,
-    });
-    return items
-        .map((e) => DaySpend.fromMap(e as Map<Object?, Object?>))
-        .toList();
-  }
+  Future<List<DaySpend>> dailySpend(int startMs, int endMs) async =>
+      _parseDaySpend(
+        await _invokeList('getDailySpend', {
+          'startMs': startMs,
+          'endMs': endMs,
+        }),
+      );
 
   @override
-  Future<List<FluxCategory>> categories() async {
-    final items = await _invokeList('getCategories');
-    return items
-        .map((e) => FluxCategory.fromMap(e as Map<Object?, Object?>))
-        .toList();
-  }
+  Future<List<FluxCategory>> categories() async =>
+      _parseCategories(await _invokeList('getCategories'));
 
   @override
   Future<void> addCategory({
@@ -209,11 +219,15 @@ class NativeBridge implements FluxBridge {
 
   /// Debug/demo injector: feeds a synthetic notification through the real
   /// pipeline. Returns the pipeline verdict ('stored'/'duplicate'/...).
+  /// Release builds reject it on both sides of the channel.
   @override
   Future<String> simulateNotification(
     String text, {
     String packageName = 'flux.simulator',
   }) async {
+    if (!kDebugMode) {
+      throw UnsupportedError('simulateNotification is debug-only');
+    }
     final res = await _invokeMap('simulateNotification', {
       'text': text,
       'packageName': packageName,

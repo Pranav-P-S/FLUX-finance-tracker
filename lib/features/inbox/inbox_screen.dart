@@ -129,18 +129,51 @@ class _TriageCard extends ConsumerStatefulWidget {
 
 class _TriageCardState extends ConsumerState<_TriageCard> {
   String? _picked;
+  bool _showRaw = false;
+  bool _working = false;
 
-  Future<void> _approve() async {
-    final categories = ref.read(categoriesProvider).value ?? [];
-    final categoryId = _picked ?? _suggest(categories);
-    await ref.read(inboxProvider.notifier).approve(widget.tx, categoryId);
-    _toast('Categorized as ${_labelOf(categories, categoryId)}');
+  Future<bool> _approve() async {
+    if (_working) return false;
+    _working = true;
+    try {
+      final categories = ref.read(categoriesProvider).value ?? [];
+      final categoryId = _picked ?? _suggest(categories);
+      await ref.read(inboxProvider.notifier).approve(widget.tx, categoryId);
+      _toast('Categorized as ${_labelOf(categories, categoryId)}');
+      return true;
+    } catch (e) {
+      _toast('Approve failed: $e');
+      return false;
+    } finally {
+      _working = false;
+    }
   }
 
-  Future<void> _discard() async {
-    await ref.read(inboxProvider.notifier).discard(widget.tx);
-    _toast('Discarded');
+  Future<bool> _discard() async {
+    if (_working) return false;
+    _working = true;
+    try {
+      await ref.read(inboxProvider.notifier).discard(widget.tx);
+      _toast('Discarded');
+      return true;
+    } catch (e) {
+      _toast('Discard failed: $e');
+      return false;
+    } finally {
+      _working = false;
+    }
   }
+
+  /// Fallback category when the provider has not loaded (or is empty): a
+  /// `.first` here crashed the first frame of a populated inbox.
+  static const _fallbackCategory = FluxCategory(
+    id: 'uncategorized',
+    label: 'Uncategorized',
+    color: Color(0xFF64748B),
+    icon: 'category',
+    keywords: [],
+    isDefault: true,
+  );
 
   String _suggest(List<FluxCategory> categories) {
     // Preselect the model's own guess when it made one.
@@ -152,13 +185,13 @@ class _TriageCardState extends ConsumerState<_TriageCard> {
     return categories
         .firstWhere(
           (c) => c.id == 'uncategorized',
-          orElse: () => categories.first,
+          orElse: () => _fallbackCategory,
         )
         .id;
   }
 
   String _labelOf(List<FluxCategory> categories, String id) => categories
-      .firstWhere((c) => c.id == id, orElse: () => categories.first)
+      .firstWhere((c) => c.id == id, orElse: () => _fallbackCategory)
       .label;
 
   void _toast(String message) {
@@ -172,6 +205,10 @@ class _TriageCardState extends ConsumerState<_TriageCard> {
         ),
       );
   }
+
+  /// Digits survive from the raw alert (account numbers, references, amounts);
+  /// only letters are shown until the user explicitly reveals the payload.
+  static String _maskRaw(String raw) => raw.replaceAll(RegExp(r'\d'), '•');
 
   @override
   Widget build(BuildContext context) {
@@ -199,12 +236,13 @@ class _TriageCardState extends ConsumerState<_TriageCard> {
       ),
       onDismissed: (_) {}, // state refresh is driven by the provider
       confirmDismiss: (direction) async {
+        // The await inside confirmDismiss must not throw past the gesture
+        // handler: a failed approve/discard keeps the card and reports why.
         if (direction == DismissDirection.startToEnd) {
-          await _approve();
+          return _approve();
         } else {
-          await _discard();
+          return _discard();
         }
-        return true;
       },
       child: GlassCard(
         padding: const EdgeInsets.all(22),
@@ -259,20 +297,24 @@ class _TriageCardState extends ConsumerState<_TriageCard> {
               ),
             ),
             const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.04),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                tx.rawText,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: FluxTheme.inkDim,
-                  fontSize: 11,
-                  height: 1.35,
+            GestureDetector(
+              // Raw alert text carries account digits; masked until tapped.
+              onTap: () => setState(() => _showRaw = !_showRaw),
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  _showRaw ? tx.rawText : _maskRaw(tx.rawText),
+                  maxLines: _showRaw ? 6 : 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: FluxTheme.inkDim,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
                 ),
               ),
             ),
