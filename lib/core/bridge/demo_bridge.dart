@@ -23,9 +23,6 @@ class DemoBridge implements FluxBridge {
       DemoData.transactions.skip(page * pageSize).take(pageSize).toList();
 
   @override
-  Future<List<Transaction>> allTransactions() async => DemoData.transactions;
-
-  @override
   Future<List<Transaction>> inbox({int limit = 100}) async =>
       DemoData.transactions.where((t) => t.needsReview).toList();
 

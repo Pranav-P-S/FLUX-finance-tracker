@@ -11,7 +11,6 @@ abstract class FluxBridge {
 
   Future<PulseSummary> pulseSummary();
   Future<List<Transaction>> transactionsPage({int page, int pageSize});
-  Future<List<Transaction>> allTransactions();
   Future<List<Transaction>> inbox({int limit});
   Future<void> categorize(int id, String categoryId);
   Future<void> deleteTransaction(int id);
@@ -40,8 +39,7 @@ abstract class FluxBridge {
 }
 
 /// Typed client for the `flux.native_bridge` MethodChannel. Lists are pulled
-/// in pages of 50 so a growing history never blocks the platform channel;
-/// [allTransactions] hides that paging from callers.
+/// in pages of 50 so a growing history never blocks the platform channel.
 class NativeBridge implements FluxBridge {
   static const _channel = MethodChannel('flux.native_bridge');
 
@@ -101,20 +99,6 @@ class NativeBridge implements FluxBridge {
     return items
         .map((e) => Transaction.fromMap(e as Map<Object?, Object?>))
         .toList();
-  }
-
-  /// Drains the native store in pages of 50 so the channel never blocks.
-  @override
-  Future<List<Transaction>> allTransactions() async {
-    final out = <Transaction>[];
-    var page = 0;
-    while (true) {
-      final chunk = await transactionsPage(page: page, pageSize: 50);
-      out.addAll(chunk);
-      if (chunk.length < 50) break;
-      page++;
-    }
-    return out;
   }
 
   @override

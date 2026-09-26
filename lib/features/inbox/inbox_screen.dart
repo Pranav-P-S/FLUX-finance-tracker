@@ -108,7 +108,7 @@ class _TriageStackState extends ConsumerState<_TriageStack> {
             scale: 1.0 - depth * 0.05,
             child: Opacity(
               opacity: 1.0 - depth * 0.3,
-              child: const GlassCard(child: SizedBox.expand()),
+              child: const GlassCard(blur: 0, child: SizedBox.expand()),
             ),
           ),
         if (visible.isNotEmpty)

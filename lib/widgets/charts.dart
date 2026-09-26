@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 
 import '../core/theme/flux_theme.dart';
@@ -16,6 +17,19 @@ class PieSlice {
     required this.color,
     required this.value,
   });
+
+  // Value equality so chart animations restart only when the data changes,
+  // not on every parent rebuild that happens to allocate a new list.
+  @override
+  bool operator ==(Object other) =>
+      other is PieSlice &&
+      other.categoryId == categoryId &&
+      other.label == label &&
+      other.color == color &&
+      other.value == value;
+
+  @override
+  int get hashCode => Object.hash(categoryId, label, color, value);
 }
 
 /// Spring-animated neon donut with glow strokes and a center total.
@@ -57,7 +71,7 @@ class _NeonPieChartState extends State<NeonPieChart>
   @override
   void didUpdateWidget(NeonPieChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.slices != widget.slices) {
+    if (!listEquals(oldWidget.slices, widget.slices)) {
       _controller.forward(from: 0);
     }
   }
@@ -70,15 +84,18 @@ class _NeonPieChartState extends State<NeonPieChart>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _anim,
-      builder: (context, _) => CustomPaint(
-        size: Size.square(widget.size),
-        painter: _NeonPiePainter(
-          slices: widget.slices,
-          progress: _anim.value.clamp(0.0, 1.0),
-          centerLabel: widget.centerLabel,
-          centerValue: widget.centerValue,
+    return Semantics(
+      label: 'Spending by category, total ${widget.centerValue}',
+      child: AnimatedBuilder(
+        animation: _anim,
+        builder: (context, _) => CustomPaint(
+          size: Size.square(widget.size),
+          painter: _NeonPiePainter(
+            slices: widget.slices,
+            progress: _anim.value.clamp(0.0, 1.0),
+            centerLabel: widget.centerLabel,
+            centerValue: widget.centerValue,
+          ),
         ),
       ),
     );
@@ -206,7 +223,7 @@ class _HistogramChartState extends State<HistogramChart>
   @override
   void didUpdateWidget(HistogramChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.bars != widget.bars) _controller.forward(from: 0);
+    if (!listEquals(oldWidget.bars, widget.bars)) _controller.forward(from: 0);
   }
 
   @override
@@ -217,13 +234,19 @@ class _HistogramChartState extends State<HistogramChart>
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: widget.height,
-      child: AnimatedBuilder(
-        animation: _anim,
-        builder: (context, _) => CustomPaint(
-          size: Size.infinite,
-          painter: _HistogramPainter(bars: widget.bars, progress: _anim.value),
+    return Semantics(
+      label: 'Daily spend histogram, ${widget.bars.length} days',
+      child: SizedBox(
+        height: widget.height,
+        child: AnimatedBuilder(
+          animation: _anim,
+          builder: (context, _) => CustomPaint(
+            size: Size.infinite,
+            painter: _HistogramPainter(
+              bars: widget.bars,
+              progress: _anim.value,
+            ),
+          ),
         ),
       ),
     );
@@ -235,6 +258,13 @@ class DaySpendBar {
   final double value;
 
   const DaySpendBar({required this.day, required this.value});
+
+  @override
+  bool operator ==(Object other) =>
+      other is DaySpendBar && other.day == day && other.value == value;
+
+  @override
+  int get hashCode => Object.hash(day, value);
 }
 
 class _HistogramPainter extends CustomPainter {

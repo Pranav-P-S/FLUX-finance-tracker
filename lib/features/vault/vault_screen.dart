@@ -286,6 +286,7 @@ class VaultScreen extends ConsumerWidget {
     final messenger = ScaffoldMessenger.of(context);
     try {
       final picked = await FilePicker.pickFiles(type: FileType.any);
+      if (picked.isEmpty) return;
       final path = picked.single.path;
       if (path == null) return;
       // The archive is streamed straight from disk on the native side; the
