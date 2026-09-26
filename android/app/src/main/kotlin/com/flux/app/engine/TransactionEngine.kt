@@ -1,8 +1,8 @@
 package com.flux.app.engine
 
-import androidx.room.withTransaction
 import com.flux.app.data.AppDatabase
 import com.flux.app.data.TransactionEntity
+import com.flux.app.data.TransactionKind
 import com.flux.app.data.TrainingSample
 import com.flux.app.ml.Categorizer
 import com.flux.app.ml.LabeledSample
@@ -14,7 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * The capture pipeline: filter → parse → dedup → categorize → store → notify.
+ * The capture pipeline: filter -> parse -> dedup -> categorize -> store -> notify.
  * All ingests are serialized through a mutex so concurrent notifications keep
  * their insertion order and the in-memory categorizer is built exactly once.
  */
@@ -44,10 +44,20 @@ class TransactionEngine(private val db: AppDatabase) {
                 ?: return@withLock IngestResult.Unparsed
 
             val amount = if (parsed.isCredit) parsed.amount else -parsed.amount
-            val hash = Dedup.hash(parsed.timestamp, amount, parsed.merchant)
+            val hash = Dedup.hash(body, sourcePackage)
+
+            val kind = when {
+                parsed.isHold -> TransactionKind.PENDING
+                parsed.isRefund -> TransactionKind.REFUND
+                else -> TransactionKind.PURCHASE
+            }
 
             val decision = current.categorize(parsed.merchant, body)
-            val needsReview = !decision.auto || parsed.parseConfidence < Categorizer.AUTO_THRESHOLD
+            val currencyMismatch = parsed.currency != baseCurrency()
+            // Holds are informational until they settle; everything uncertain
+            // (weak parse, weak model guess, foreign currency) waits in the Inbox.
+            val needsReview = kind != TransactionKind.PENDING &&
+                (!decision.auto || parsed.parseConfidence < Categorizer.AUTO_THRESHOLD || currencyMismatch)
 
             val entity = TransactionEntity(
                 hash = hash,
@@ -62,11 +72,16 @@ class TransactionEngine(private val db: AppDatabase) {
                 categoryConfidence = decision.confidence,
                 needsReview = needsReview,
                 parseMethod = parsed.ruleId,
+                kind = kind,
                 createdAt = System.currentTimeMillis(),
             )
 
             val insertedId = db.transactions().insertAll(listOf(entity))[0]
             if (insertedId == -1L) return@withLock IngestResult.Duplicate
+
+            if (kind == TransactionKind.PURCHASE && amount < 0) {
+                settleMatchingHold(entity)
+            }
 
             _changes.tryEmit(Unit)
             IngestResult.Stored(entity.copy(id = insertedId))
@@ -84,6 +99,41 @@ class TransactionEngine(private val db: AppDatabase) {
         mutex.withLock { categorizer = buildCategorizer() }
     }
 
+    /**
+     * Expires authorization holds that never settled. Runs whenever the process
+     * wakes up — app open or listener rebinding — so no scheduler is needed.
+     */
+    suspend fun sweep() {
+        mutex.withLock {
+            db.transactions().deletePendingBefore(System.currentTimeMillis() - PENDING_TTL_MS)
+        }
+    }
+
+    private suspend fun baseCurrency(): String =
+        db.settings().get("base_currency") ?: DEFAULT_BASE_CURRENCY
+
+    /**
+     * A hold followed by a debit from the same payee is its settlement: a fuel
+     * pump authorizes for its maximum and the final charge posts lower. Drop
+     * the hold so only the real charge reaches the totals.
+     */
+    private suspend fun settleMatchingHold(purchase: TransactionEntity) {
+        val payee = normalizePayee(purchase.merchant)
+        val hold = db.transactions().pendingHolds().firstOrNull { candidate ->
+            val heldPayee = normalizePayee(candidate.merchant)
+            val samePayee = if (payee.length < 3 || heldPayee.length < 3) {
+                payee == heldPayee
+            } else {
+                heldPayee.contains(payee) || payee.contains(heldPayee)
+            }
+            samePayee && -candidate.amount >= -purchase.amount
+        }
+        if (hold != null) db.transactions().delete(hold.id)
+    }
+
+    private fun normalizePayee(value: String): String =
+        value.lowercase().replace(Regex("[^a-z0-9]"), "").ifEmpty { value.lowercase() }
+
     private suspend fun buildCategorizer(): Categorizer {
         val categories = db.categories().all()
         val samples = db.training().all().map { LabeledSample(it.text, it.categoryId) }
@@ -100,5 +150,7 @@ class TransactionEngine(private val db: AppDatabase) {
 
     companion object {
         private const val MIN_TRAINING_SAMPLES = 10
+        private const val DEFAULT_BASE_CURRENCY = "INR"
+        private const val PENDING_TTL_MS = 72L * 60 * 60 * 1000
     }
 }

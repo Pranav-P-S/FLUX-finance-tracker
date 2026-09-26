@@ -25,6 +25,10 @@ data class ParsedTransaction(
     val ruleId: String,
     /** 0..1 — how sure the parser itself is; < 0.8 forces Inbox triage. */
     val parseConfidence: Double,
+    /** Money returned for a prior purchase — must offset spend, not inflate income. */
+    val isRefund: Boolean = false,
+    /** Authorization hold or pending entry — excluded from totals until it settles. */
+    val isHold: Boolean = false,
 )
 
 object UniversalParser {
@@ -45,6 +49,16 @@ object UniversalParser {
     private val DEBIT_VERBS = Regex(
         """(?i)\b(debited|debit|spent|paid|pay|purchase|purchased|withdrawn|withdrawal|deducted|charged|sent|transfer(?:red)? to|order(?:ed)?|booked|subscription)\b"""
     )
+
+    /** Money coming back for a previous purchase — not new income. */
+    private val REFUND_MARKERS = Regex("""(?i)\b(refund(?:ed)?|reversal|reversed)\b""")
+
+    /**
+     * Authorization holds and pending entries (fuel pumps, hotels). The actual
+     * charge usually posts later at a different amount, so these must never
+     * count toward totals.
+     */
+    private val HOLD_MARKERS = Regex("""(?i)\b(pre-?auth(?:orization)?|hold(?:ing)?|held|pending)\b""")
 
     // "at STARBUCKS", "to Swiggy", "by AMAZON PAY INDIA", "towards Electricity Bill" ...
     private val MERCHANT_PREFIXED = Regex(
@@ -116,6 +130,8 @@ object UniversalParser {
             timestamp = timestamp,
             ruleId = if (isHeuristic) "heuristic" else if (isCredit) "generic_credit" else "generic_debit",
             parseConfidence = confidence,
+            isRefund = isCredit && REFUND_MARKERS.containsMatchIn(text),
+            isHold = HOLD_MARKERS.containsMatchIn(text),
         )
     }
 

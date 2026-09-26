@@ -31,10 +31,11 @@ class AppGraph private constructor(val appContext: Context) {
 
     init {
         db = Room.databaseBuilder(appContext, AppDatabase::class.java, "flux.db")
-            .fallbackToDestructiveMigration()
+            .addMigrations(AppDatabase.MIGRATION_1_2)
             .build()
         engine = TransactionEngine(db)
         scope.launch { seed(appContext) }
+        scope.launch { engine.sweep() }
         scope.launch(Dispatchers.Main) {
             engine.changes.collect {
                 runCatching { messenger?.send(CHANNEL, null) }

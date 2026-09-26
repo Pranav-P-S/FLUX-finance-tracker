@@ -1,6 +1,5 @@
 package com.flux.app.bridge
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -9,8 +8,7 @@ import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.room.withTransaction
-import org.json.JSONArray
-import org.json.JSONObject
+import com.flux.app.data.AppDatabase
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -76,16 +74,26 @@ class Bridge(private val graph: AppGraph) {
             "getSpendingByCategory" -> {
                 val start = (args["startMs"] as? Number)?.toLong() ?: 0L
                 val end = (args["endMs"] as? Number)?.toLong() ?: Long.MAX_VALUE
-                db.transactions().range(start, end)
-                    .filter { it.amount < 0 }
-                    .groupBy { it.category }
-                    .map { (category, txs) ->
-                        mapOf(
-                            "categoryId" to category,
-                            "total" to txs.sumOf { -it.amount },
-                            "count" to txs.size,
-                        )
+                // Purchases add to a category's spend; refunds for that payee's
+                // category subtract from it. Holds never reach the ledger.
+                val spend = mutableMapOf<String, Double>()
+                val counts = mutableMapOf<String, Int>()
+                db.transactions().range(start, end).filter { it.kind != "pending" }.forEach { tx ->
+                    if (tx.amount < 0) {
+                        spend.merge(tx.category, -tx.amount, Double::plus)
+                        counts.merge(tx.category, 1, Int::plus)
+                    } else if (tx.kind == "refund") {
+                        spend.merge(tx.category, -tx.amount, Double::plus)
+                        counts.merge(tx.category, 1, Int::plus)
                     }
+                }
+                spend.map { (category, total) ->
+                    mapOf(
+                        "categoryId" to category,
+                        "total" to total.coerceAtLeast(0.0),
+                        "count" to (counts[category] ?: 0),
+                    )
+                }
                     .sortedByDescending { it["total"] as Double }
             }
 
@@ -94,7 +102,7 @@ class Bridge(private val graph: AppGraph) {
                 val end = (args["endMs"] as? Number)?.toLong() ?: Long.MAX_VALUE
                 val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
                 db.transactions().range(start, end)
-                    .filter { it.amount < 0 }
+                    .filter { it.amount < 0 && it.kind != "pending" }
                     .groupBy { fmt.format(Date(it.timestamp)) }
                     .map { (day, txs) -> mapOf("day" to day, "total" to txs.sumOf { -it.amount }) }
                     .sortedBy { it["day"] as String }
@@ -151,8 +159,19 @@ class Bridge(private val graph: AppGraph) {
             "exportState" -> exportState()
 
             "importState" -> {
-                val json = args["json"] as? String ?: error("json required")
-                importState(json)
+                val path = args["path"] as? String ?: error("path required")
+                importState(path)
+            }
+
+            "getBaseCurrency" -> mapOf(
+                "currency" to (db.settings().get("base_currency") ?: "INR"),
+            )
+
+            "setBaseCurrency" -> {
+                val currency = args["currency"] as? String ?: error("currency required")
+                require(currency in SUPPORTED_CURRENCIES) { "unsupported currency $currency" }
+                db.settings().put(com.flux.app.data.SettingEntry("base_currency", currency))
+                true
             }
 
             "isNotificationAccessGranted" -> mapOf(
@@ -235,53 +254,71 @@ class Bridge(private val graph: AppGraph) {
 
     private suspend fun exportState(): Map<String, Any?> {
         val db = graph.db
-        val root = JSONObject()
-        root.put("flux_export_version", 1)
-        root.put("exported_at", System.currentTimeMillis())
-
-        val baseState = JSONObject()
-        val categories = JSONArray()
-        db.categories().all().forEach { c ->
-            categories.put(
-                JSONObject()
-                    .put("id", c.id)
-                    .put("label", c.label)
-                    .put("color", c.color)
-                    .put("icon", c.icon)
-                    .put("keywords", JSONArray(c.keywords))
-                    .put("isDefault", c.isDefault),
-            )
-        }
-        baseState.put("categories", categories)
-        val settings = JSONObject()
-        db.settings().all().forEach { settings.put(it.key, it.value) }
-        baseState.put("settings", settings)
-        root.put("base_state", baseState)
-
-        val transactions = JSONArray()
-        db.transactions().all().forEach { t ->
-            transactions.put(
-                JSONObject()
-                    .put("id", t.id)
-                    .put("hash", t.hash)
-                    .put("amount", t.amount)
-                    .put("currency", t.currency)
-                    .put("merchant", t.merchant)
-                    .put("accountHint", t.accountHint ?: JSONObject.NULL)
-                    .put("timestamp", t.timestamp)
-                    .put("sourcePackage", t.sourcePackage)
-                    .put("rawText", t.rawText)
-                    .put("category", t.category)
-                    .put("categoryConfidence", t.categoryConfidence)
-                    .put("needsReview", t.needsReview)
-                    .put("parseMethod", t.parseMethod)
-                    .put("createdAt", t.createdAt),
-            )
-        }
-        root.put("transactions", transactions)
-
         val name = "flux_export_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.json"
         val context = graphContext()
+
+        // Streamed serialization: rows are pulled from the database in pages and
+        // written straight to disk, so memory stays flat regardless of archive size.
+        suspend fun writeArchive(writer: android.util.JsonWriter) {
+            writer.beginObject()
+            writer.name("flux_export_version").value(EXPORT_VERSION)
+            writer.name("exported_at").value(System.currentTimeMillis())
+
+            writer.name("base_state")
+            writer.beginObject()
+            writer.name("categories")
+            writer.beginArray()
+            for (c in db.categories().all()) {
+                writer.beginObject()
+                writer.name("id").value(c.id)
+                writer.name("label").value(c.label)
+                writer.name("color").value(c.color)
+                writer.name("icon").value(c.icon)
+                writer.name("keywords")
+                writer.beginArray()
+                for (keyword in c.keywords) writer.value(keyword)
+                writer.endArray()
+                writer.name("isDefault").value(c.isDefault)
+                writer.endObject()
+            }
+            writer.endArray()
+            writer.name("settings")
+            writer.beginObject()
+            for (entry in db.settings().all()) writer.name(entry.key).value(entry.value)
+            writer.endObject()
+            writer.endObject()
+
+            writer.name("transactions")
+            writer.beginArray()
+            var page = 0
+            while (true) {
+                val chunk = db.transactions().page(page, EXPORT_PAGE_SIZE)
+                for (t in chunk) {
+                    writer.beginObject()
+                    writer.name("id").value(t.id)
+                    writer.name("hash").value(t.hash)
+                    writer.name("amount").value(t.amount)
+                    writer.name("currency").value(t.currency)
+                    writer.name("merchant").value(t.merchant)
+                    writer.name("accountHint").value(t.accountHint ?: "null")
+                    writer.name("timestamp").value(t.timestamp)
+                    writer.name("sourcePackage").value(t.sourcePackage)
+                    writer.name("rawText").value(t.rawText)
+                    writer.name("category").value(t.category)
+                    writer.name("categoryConfidence").value(t.categoryConfidence)
+                    writer.name("needsReview").value(t.needsReview)
+                    writer.name("parseMethod").value(t.parseMethod)
+                    writer.name("kind").value(t.kind)
+                    writer.name("createdAt").value(t.createdAt)
+                    writer.endObject()
+                }
+                if (chunk.size < EXPORT_PAGE_SIZE) break
+                page++
+            }
+            writer.endArray()
+            writer.endObject()
+        }
+
         val path = if (Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED &&
             android.os.Build.VERSION.SDK_INT >= 29
         ) {
@@ -292,85 +329,200 @@ class Bridge(private val graph: AppGraph) {
             val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: error("could not create download entry")
             context.contentResolver.openOutputStream(uri)!!.use { out ->
-                out.write(root.toString().toByteArray(Charsets.UTF_8))
+                java.io.BufferedWriter(java.io.OutputStreamWriter(out, Charsets.UTF_8)).use { buffered ->
+                    android.util.JsonWriter(buffered).use { writer -> writeArchive(writer) }
+                }
             }
             uri.toString()
         } else {
             val dir = context.getExternalFilesDir(null) ?: context.filesDir
             val file = File(dir, name)
-            file.writeText(root.toString())
+            file.outputStream().use { out ->
+                java.io.BufferedWriter(java.io.OutputStreamWriter(out, Charsets.UTF_8)).use { buffered ->
+                    android.util.JsonWriter(buffered).use { writer -> writeArchive(writer) }
+                }
+            }
             file.absolutePath
         }
         return mapOf("path" to path)
     }
 
-    private suspend fun importState(json: String): Map<String, Any?> {
-        val root = JSONObject(json)
-        val version = root.optInt("flux_export_version", -1)
-        require(version in 1..1) { "unsupported flux_export_version $version" }
-
+    /**
+     * Streams an archive back in. Accepts a file path so neither side ever
+     * holds the whole document in memory. v1 archives (no `kind` field) import
+     * as plain purchases.
+     */
+    private suspend fun importState(path: String): Map<String, Any?> {
         val db = graph.db
-        val importedCount = db.withTransaction {
-            db.transactions().clear()
-            db.categories().all().forEach { db.categories().delete(it) }
-            db.training().clear()
+        val importedCount = java.io.FileInputStream(path).use { fin ->
+            java.io.InputStreamReader(fin, Charsets.UTF_8).use { streamReader ->
+                android.util.JsonReader(streamReader).use { reader ->
+                    db.withTransaction {
+                        db.transactions().clear()
+                        db.categories().all().forEach { db.categories().delete(it) }
+                        db.training().clear()
 
-            val baseState = root.getJSONObject("base_state")
-            val categories = baseState.getJSONArray("categories")
-            for (i in 0 until categories.length()) {
-                val c = categories.getJSONObject(i)
-                db.categories().upsert(
-                    com.flux.app.data.CategoryEntity(
-                        id = c.getString("id"),
-                        label = c.getString("label"),
-                        color = c.getLong("color"),
-                        icon = c.optString("icon", "category"),
-                        keywords = c.optJSONArray("keywords")?.let { arr ->
-                            (0 until arr.length()).map { arr.getString(it) }
-                        } ?: emptyList(),
-                        isDefault = c.optBoolean("isDefault", false),
-                    ),
-                )
-            }
-            val settings = baseState.optJSONObject("settings")
-            if (settings != null) {
-                for (key in settings.keys()) {
-                    db.settings().put(com.flux.app.data.SettingEntry(key, settings.getString(key)))
+                        var imported = 0
+                        reader.beginObject()
+                        while (reader.hasNext()) {
+                            when (reader.nextName()) {
+                                "flux_export_version" -> {
+                                    val version = reader.nextInt()
+                                    require(version in 1..EXPORT_VERSION) {
+                                        "unsupported flux_export_version $version"
+                                    }
+                                }
+                                "base_state" -> importBaseState(reader, db)
+                                "transactions" -> {
+                                    reader.beginArray()
+                                    while (reader.hasNext()) {
+                                        val entity = importTransaction(reader)
+                                        db.transactions().insertAll(listOf(entity))
+                                        imported++
+                                    }
+                                    reader.endArray()
+                                }
+                                else -> reader.skipValue()
+                            }
+                        }
+                        reader.endObject()
+                        imported
+                    }
                 }
             }
-
-            val transactions = root.getJSONArray("transactions")
-            for (i in 0 until transactions.length()) {
-                val t = transactions.getJSONObject(i)
-                db.transactions().insertAll(
-                    listOf(
-                        com.flux.app.data.TransactionEntity(
-                            id = t.getLong("id"),
-                            hash = t.getString("hash"),
-                            amount = t.getDouble("amount"),
-                            currency = t.optString("currency", "INR"),
-                            merchant = t.getString("merchant"),
-                            accountHint = t.optString("accountHint").takeIf { it.isNotEmpty() && it != "null" },
-                            timestamp = t.getLong("timestamp"),
-                            sourcePackage = t.optString("sourcePackage", "import"),
-                            rawText = t.optString("rawText", ""),
-                            category = t.optString("category", "uncategorized"),
-                            categoryConfidence = t.optDouble("categoryConfidence", 0.0),
-                            needsReview = t.optBoolean("needsReview", false),
-                            parseMethod = t.optString("parseMethod", "import"),
-                            createdAt = t.optLong("createdAt", System.currentTimeMillis()),
-                        ),
-                    ),
-                )
-            }
-            transactions.length()
         }
         graph.engine.retrain()
         return mapOf("imported" to importedCount)
     }
 
+    private suspend fun importBaseState(reader: android.util.JsonReader, db: AppDatabase) {
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "categories" -> {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        var id = ""
+                        var label = ""
+                        var color = 0xFF64748BL
+                        var icon = "category"
+                        var keywords: List<String> = emptyList()
+                        var isDefault = false
+                        reader.beginObject()
+                        while (reader.hasNext()) {
+                            when (reader.nextName()) {
+                                "id" -> id = reader.nextString()
+                                "label" -> label = reader.nextString()
+                                "color" -> color = reader.nextLong()
+                                "icon" -> icon = reader.nextString()
+                                "keywords" -> {
+                                    keywords = mutableListOf<String>().also { list ->
+                                        reader.beginArray()
+                                        while (reader.hasNext()) list.add(reader.nextString())
+                                        reader.endArray()
+                                    }
+                                }
+                                "isDefault" -> isDefault = reader.nextBoolean()
+                                else -> reader.skipValue()
+                            }
+                        }
+                        reader.endObject()
+                        db.categories().upsert(
+                            com.flux.app.data.CategoryEntity(
+                                id = id,
+                                label = label,
+                                color = color,
+                                icon = icon,
+                                keywords = keywords,
+                                isDefault = isDefault,
+                            ),
+                        )
+                    }
+                    reader.endArray()
+                }
+                "settings" -> {
+                    reader.beginObject()
+                    while (reader.hasNext()) {
+                        val key = reader.nextName()
+                        db.settings().put(com.flux.app.data.SettingEntry(key, reader.nextString()))
+                    }
+                    reader.endObject()
+                }
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+    }
+
+    private fun importTransaction(reader: android.util.JsonReader): com.flux.app.data.TransactionEntity {
+        var id = 0L
+        var hash = ""
+        var amount = 0.0
+        var currency = "INR"
+        var merchant = ""
+        var accountHint: String? = null
+        var timestamp = 0L
+        var sourcePackage = "import"
+        var rawText = ""
+        var category = "uncategorized"
+        var categoryConfidence = 0.0
+        var needsReview = false
+        var parseMethod = "import"
+        var kind = com.flux.app.data.TransactionKind.PURCHASE
+        var createdAt = System.currentTimeMillis()
+
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "id" -> id = reader.nextLong()
+                "hash" -> hash = reader.nextString()
+                "amount" -> amount = reader.nextDouble()
+                "currency" -> currency = reader.nextString()
+                "merchant" -> merchant = reader.nextString()
+                "accountHint" -> {
+                    if (reader.peek() == android.util.JsonToken.NULL) reader.nextNull() else {
+                        val value = reader.nextString()
+                        accountHint = value.takeIf { it != "null" }
+                    }
+                }
+                "timestamp" -> timestamp = reader.nextLong()
+                "sourcePackage" -> sourcePackage = reader.nextString()
+                "rawText" -> rawText = reader.nextString()
+                "category" -> category = reader.nextString()
+                "categoryConfidence" -> categoryConfidence = reader.nextDouble()
+                "needsReview" -> needsReview = reader.nextBoolean()
+                "parseMethod" -> parseMethod = reader.nextString()
+                "kind" -> kind = reader.nextString()
+                "createdAt" -> createdAt = reader.nextLong()
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+
+        return com.flux.app.data.TransactionEntity(
+            id = id,
+            hash = hash,
+            amount = amount,
+            currency = currency,
+            merchant = merchant,
+            accountHint = accountHint,
+            timestamp = timestamp,
+            sourcePackage = sourcePackage,
+            rawText = rawText,
+            category = category,
+            categoryConfidence = categoryConfidence,
+            needsReview = needsReview,
+            parseMethod = parseMethod,
+            kind = kind,
+            createdAt = createdAt,
+        )
+    }
+
     companion object {
         const val PAGE_SIZE = 50
+        private const val EXPORT_VERSION = 1
+        private const val EXPORT_PAGE_SIZE = 500
+        private val SUPPORTED_CURRENCIES = setOf("INR", "USD", "EUR", "GBP")
     }
 }
 
@@ -386,6 +538,7 @@ fun com.flux.app.data.TransactionEntity.toMap(): Map<String, Any?> = mapOf(
     "categoryConfidence" to categoryConfidence,
     "needsReview" to needsReview,
     "parseMethod" to parseMethod,
+    "kind" to kind,
     "sourcePackage" to sourcePackage,
     "rawText" to rawText,
 )

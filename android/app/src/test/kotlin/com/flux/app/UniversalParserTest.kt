@@ -35,6 +35,42 @@ class UniversalParserTest {
     }
 
     @Test
+    fun `refund credits are marked as refunds`() {
+        val parsed = UniversalParser.parse(
+            "Refund of Rs 1,200.00 received from FLIPKART to your account on 26-09",
+            now,
+        )!!
+        assertTrue(parsed.isCredit)
+        assertTrue(parsed.isRefund)
+    }
+
+    @Test
+    fun `salary is not a refund`() {
+        val parsed = UniversalParser.parse(
+            "INR 65,000.00 credited to your account towards SALARY from ACME CORP on 01-10",
+            now,
+        )!!
+        assertTrue(parsed.isCredit)
+        assertTrue(!parsed.isRefund)
+    }
+
+    @Test
+    fun `authorization holds are marked as pending`() {
+        val parsed = UniversalParser.parse(
+            "Rs 100.00 held as pre-authorization by INDIAN OIL on card XX8842",
+            now,
+        )!!
+        assertTrue(parsed.isHold)
+        assertTrue(!parsed.isCredit)
+    }
+
+    @Test
+    fun `pending marker flags a hold`() {
+        val parsed = UniversalParser.parse("Rs 500 debited to AMAZON (pending settlement)", now)!!
+        assertTrue(parsed.isHold)
+    }
+
+    @Test
     fun `parses credit with salary wording`() {
         val text = "INR 65,000.00 credited to your account towards SALARY from ACME CORP on 01-10"
         val parsed = UniversalParser.parse(text, now)!!

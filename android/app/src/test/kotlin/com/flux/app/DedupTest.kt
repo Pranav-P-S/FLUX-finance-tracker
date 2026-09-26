@@ -8,32 +8,35 @@ import org.junit.Test
 
 class DedupTest {
 
+    private val alert = "Rs 2,450.00 debited from A/c XX8842 towards SWIGGY Refno 550012"
+
     @Test
-    fun `same inputs produce identical hash`() {
-        val a = Dedup.hash(1_726_000_000_123, -450.0, "SWIGGY")
-        val b = Dedup.hash(1_726_000_000_987, -450.0, "SWIGGY")
-        assertEquals(a, b) // same minute, amounts collapse
+    fun `same alert from the same app collapses to one identity`() {
+        assertEquals(Dedup.hash(alert, "com.bank.app"), Dedup.hash(alert, "com.bank.app"))
     }
 
     @Test
-    fun `merchant case is normalized`() {
+    fun `identical purchase from a different app is a distinct row`() {
+        assertNotEquals(Dedup.hash(alert, "com.bank.app"), Dedup.hash(alert, "com.otherbank"))
+    }
+
+    @Test
+    fun `different authorization code in the text is a distinct purchase`() {
+        val secondCoffee = "Rs 450.00 debited from A/c XX8842 towards STARBUCKS Refno 550013"
+        assertNotEquals(Dedup.hash(alert, "com.bank.app"), Dedup.hash(secondCoffee, "com.bank.app"))
+    }
+
+    @Test
+    fun `replayed alert with different surrounding whitespace still collapses`() {
         assertEquals(
-            Dedup.hash(1_726_000_000, -10.0, "uber INDIA"),
-            Dedup.hash(1_726_000_000, -10.0, "Uber India"),
+            Dedup.hash(alert, "com.bank.app"),
+            Dedup.hash("  $alert  ", "com.bank.app"),
         )
     }
 
     @Test
-    fun `different amounts or minutes diverge`() {
-        val base = Dedup.hash(1_726_000_000, -10.0, "uber")
-        assertNotEquals(base, Dedup.hash(1_726_000_000, -11.0, "uber"))
-        assertNotEquals(base, Dedup.hash(1_726_060_000, -10.0, "uber")) // next minute
-        assertNotEquals(base, Dedup.hash(1_726_000_000, 10.0, "uber")) // debit vs credit
-    }
-
-    @Test
     fun `hash is 64 hex chars`() {
-        val h = Dedup.hash(0, 1.0, "x")
+        val h = Dedup.hash("x", "pkg")
         assertEquals(64, h.length)
         assertTrue(h.all { it in "0123456789abcdef" })
     }

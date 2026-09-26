@@ -31,17 +31,25 @@ interface TransactionDao {
     @Query("SELECT COUNT(*) FROM transactions")
     suspend fun count(): Int
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions")
+    /** Net account movement. Pending holds have not left the account yet. */
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind != 'pending'")
     suspend fun net(): Double
 
-    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0")
+    /** Earned income only — refunds offset spend instead of inflating income. */
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE amount > 0 AND kind = 'purchase'")
     suspend fun totalCredit(): Double
 
-    @Query("SELECT COALESCE(SUM(-amount), 0) FROM transactions WHERE amount < 0")
+    @Query("SELECT COALESCE(SUM(-amount), 0) FROM transactions WHERE amount < 0 AND kind != 'pending'")
     suspend fun totalDebit(): Double
 
     @Query("SELECT COUNT(*) FROM transactions WHERE needsReview = 1")
     suspend fun pendingReview(): Int
+
+    @Query("SELECT * FROM transactions WHERE kind = 'pending' ORDER BY createdAt ASC")
+    suspend fun pendingHolds(): List<TransactionEntity>
+
+    @Query("DELETE FROM transactions WHERE kind = 'pending' AND createdAt < :cutoffMs")
+    suspend fun deletePendingBefore(cutoffMs: Long): Int
 
     @Query("DELETE FROM transactions WHERE id = :id")
     suspend fun delete(id: Long)

@@ -5,10 +5,21 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import androidx.room.TypeConverter
 
+/** Lifecycle of a money event, decided by the capture pipeline. */
+object TransactionKind {
+    const val PURCHASE = "purchase"
+    const val REFUND = "refund"
+    const val PENDING = "pending"
+}
+
 /**
  * A single money event extracted from a notification. [hash] is the dedup key:
- * SHA-256(epochMinute | amount | merchant) — see com.flux.app.engine.Dedup.
+ * SHA-256(raw alert text | posting app) — see com.flux.app.engine.Dedup.
  * [amount] is signed: debits are negative, credits positive.
+ *
+ * [kind] controls accounting: refunds offset their category instead of
+ * counting as income, and pending holds are excluded from every aggregate
+ * until they settle or expire.
  */
 @Entity(
     tableName = "transactions",
@@ -28,6 +39,7 @@ data class TransactionEntity(
     val categoryConfidence: Double,
     val needsReview: Boolean,
     val parseMethod: String,
+    val kind: String = TransactionKind.PURCHASE,
     val createdAt: Long,
 )
 
