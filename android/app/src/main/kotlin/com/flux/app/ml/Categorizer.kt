@@ -9,7 +9,7 @@ import com.flux.app.data.CategoryEntity
  * for manual review in the Inbox instead.
  */
 class Categorizer(
-    categories: List<CategoryEntity>,
+    private val categories: List<CategoryEntity>,
     private val model: NaiveBayesClassifier?,
 ) {
     data class Decision(
@@ -26,8 +26,11 @@ class Categorizer(
         .flatMap { c -> c.keywords.filter { it.length >= 3 }.map { DictEntry(c.id, it.lowercase()) } }
         .sortedByDescending { it.keyword.length }
 
-    fun categorize(merchant: String, rawText: String): Decision {
-        val merchantLower = merchant.lowercase().trim()
+    /** Returns a categorizer whose model has additionally learned one example. */
+    fun withTraining(text: String, categoryId: String): Categorizer =
+        Categorizer(categories, model?.updated(LabeledSample(text, categoryId)))
+
+    fun categorize(merchant: String, rawText: String): Decision {        val merchantLower = merchant.lowercase().trim()
 
         // Level 1 — longest keyword wins (e.g. "indian oil" beats "oil").
         dictionary.firstOrNull { merchantLower.contains(it.keyword) }?.let {

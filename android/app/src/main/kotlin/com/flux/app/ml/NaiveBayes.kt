@@ -49,6 +49,29 @@ class NaiveBayesClassifier private constructor(
         return Classification(best.key, best.value / sum)
     }
 
+    /**
+     * Returns a classifier that additionally knows one labeled example. Used for
+     * incremental learning on user corrections so a correction never triggers a
+     * full database rebuild. Text is sanitized by the caller.
+     */
+    fun updated(sample: LabeledSample): NaiveBayesClassifier {
+        val tokens = tokenize(sample.text).toSet()
+        if (tokens.isEmpty()) return this
+
+        val counts = HashMap(tokenCounts)
+        val perCategory = HashMap(counts[sample.categoryId] ?: emptyMap())
+        for (token in tokens) perCategory.merge(token, 1, Int::plus)
+        counts[sample.categoryId] = perCategory
+
+        val totals = HashMap(tokenTotals)
+        totals[sample.categoryId] = (totals[sample.categoryId] ?: 0) + tokens.size
+
+        val docs = HashMap(docCounts)
+        docs[sample.categoryId] = (docs[sample.categoryId] ?: 0) + 1
+
+        return NaiveBayesClassifier(counts, totals, docs, vocabulary + tokens)
+    }
+
     private fun ln(x: Double) = kotlin.math.ln(x)
 
     companion object {

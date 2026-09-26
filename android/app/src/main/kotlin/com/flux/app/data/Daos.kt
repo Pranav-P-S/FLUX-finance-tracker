@@ -51,6 +51,10 @@ interface TransactionDao {
     @Query("DELETE FROM transactions WHERE kind = 'pending' AND createdAt < :cutoffMs")
     suspend fun deletePendingBefore(cutoffMs: Long): Int
 
+    /** Raw alert text only lives as long as it can be useful: triage and audit. */
+    @Query("UPDATE transactions SET rawText = '' WHERE needsReview = 0 AND createdAt < :cutoffMs")
+    suspend fun scrubRawTextBefore(cutoffMs: Long): Int
+
     @Query("DELETE FROM transactions WHERE id = :id")
     suspend fun delete(id: Long)
 

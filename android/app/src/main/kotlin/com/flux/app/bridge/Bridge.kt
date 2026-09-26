@@ -259,6 +259,7 @@ class Bridge(private val graph: AppGraph) {
 
         // Streamed serialization: rows are pulled from the database in pages and
         // written straight to disk, so memory stays flat regardless of archive size.
+        // Raw alert text is deliberately omitted — archives land in shared storage.
         suspend fun writeArchive(writer: android.util.JsonWriter) {
             writer.beginObject()
             writer.name("flux_export_version").value(EXPORT_VERSION)
@@ -303,7 +304,6 @@ class Bridge(private val graph: AppGraph) {
                     writer.name("accountHint").value(t.accountHint ?: "null")
                     writer.name("timestamp").value(t.timestamp)
                     writer.name("sourcePackage").value(t.sourcePackage)
-                    writer.name("rawText").value(t.rawText)
                     writer.name("category").value(t.category)
                     writer.name("categoryConfidence").value(t.categoryConfidence)
                     writer.name("needsReview").value(t.needsReview)

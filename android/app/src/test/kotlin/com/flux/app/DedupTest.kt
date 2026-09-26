@@ -1,7 +1,9 @@
 package com.flux.app
 
 import com.flux.app.engine.Dedup
+import com.flux.app.engine.TransactionEngine
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,5 +41,18 @@ class DedupTest {
         val h = Dedup.hash("x", "pkg")
         assertEquals(64, h.length)
         assertTrue(h.all { it in "0123456789abcdef" })
+    }
+
+    @Test
+    fun `training text strips digits and references from the raw payload`() {
+        val sanitized = TransactionEngine.sanitizeTrainingText(
+            "SWIGGY",
+            "Rs 2,450.00 debited from A/c XX8842 on 26-09-26 towards SWIGGY Refno 550012",
+        )
+        assertFalse(sanitized.contains("2450"))
+        assertFalse(sanitized.contains("8842"))
+        assertFalse(sanitized.contains("550012"))
+        assertTrue(sanitized.startsWith("SWIGGY"))
+        assertTrue(sanitized.contains("debited"))
     }
 }

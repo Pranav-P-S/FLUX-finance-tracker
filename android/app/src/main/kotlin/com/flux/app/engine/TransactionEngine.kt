@@ -32,6 +32,7 @@ class TransactionEngine(private val db: AppDatabase) {
     val changes: SharedFlow<Unit> = _changes
 
     private var categorizer: Categorizer? = null
+    private var trainingCount = 0
 
     suspend fun ingest(text: String, sourcePackage: String, postTimeMs: Long): IngestResult =
         mutex.withLock {
@@ -87,11 +88,22 @@ class TransactionEngine(private val db: AppDatabase) {
             IngestResult.Stored(entity.copy(id = insertedId))
         }
 
-    /** Record a manual user decision as a training sample and retrain immediately. */
+    /**
+     * Records a manual decision and folds it into the model incrementally —
+     * no database rebuild on the hot path. The stored text is sanitized:
+     * payee plus purpose words only, never the raw alert payload.
+     */
     suspend fun learn(merchant: String, rawText: String, categoryId: String) {
         mutex.withLock {
-            db.training().add(TrainingSample(text = "$merchant $rawText".trim(), categoryId = categoryId))
-            categorizer = buildCategorizer()
+            val text = sanitizeTrainingText(merchant, rawText)
+            db.training().add(TrainingSample(text = text, categoryId = categoryId))
+            trainingCount++
+            val current = categorizer
+            categorizer = when {
+                current != null -> current.withTraining(text, categoryId)
+                trainingCount >= MIN_TRAINING_SAMPLES -> buildCategorizer()
+                else -> null
+            }
         }
     }
 
@@ -100,12 +112,19 @@ class TransactionEngine(private val db: AppDatabase) {
     }
 
     /**
-     * Expires authorization holds that never settled. Runs whenever the process
-     * wakes up — app open or listener rebinding — so no scheduler is needed.
+     * Housekeeping that runs whenever the process wakes up — app open or
+     * listener rebinding. No scheduler is involved.
+     *
+     * Pending holds expire 72 hours after capture if their settlement never
+     * arrived. Raw alert text is scrubbed from settled rows after the same
+     * window: it is needed for triage while a row waits in the Inbox, and is
+     * kept no longer than that.
      */
     suspend fun sweep() {
         mutex.withLock {
-            db.transactions().deletePendingBefore(System.currentTimeMillis() - PENDING_TTL_MS)
+            val cutoff = System.currentTimeMillis() - RAW_TEXT_TTL_MS
+            db.transactions().deletePendingBefore(cutoff)
+            db.transactions().scrubRawTextBefore(cutoff)
         }
     }
 
@@ -137,6 +156,7 @@ class TransactionEngine(private val db: AppDatabase) {
     private suspend fun buildCategorizer(): Categorizer {
         val categories = db.categories().all()
         val samples = db.training().all().map { LabeledSample(it.text, it.categoryId) }
+        trainingCount = samples.size
         val model = if (samples.size >= MIN_TRAINING_SAMPLES) NaiveBayesClassifier.train(samples) else null
         return Categorizer(categories, model)
     }
@@ -152,5 +172,19 @@ class TransactionEngine(private val db: AppDatabase) {
         private const val MIN_TRAINING_SAMPLES = 10
         private const val DEFAULT_BASE_CURRENCY = "INR"
         private const val PENDING_TTL_MS = 72L * 60 * 60 * 1000
+        private const val RAW_TEXT_TTL_MS = 72L * 60 * 60 * 1000
+
+        /**
+         * Training text keeps the classifier signal — payee and purpose words —
+         * and drops everything that could identify a person: digit runs
+         * (references, amounts, account digits) and oversized fragments.
+         */
+        fun sanitizeTrainingText(merchant: String, rawText: String): String {
+            val words = rawText.split(Regex("[^A-Za-z]+"))
+                .filter { it.length in 3..20 }
+                .distinct()
+                .take(40)
+            return (listOf(merchant) + words).joinToString(" ").trim()
+        }
     }
 }
